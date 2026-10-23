@@ -1,0 +1,453 @@
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from unittest.mock import Mock, patch
+
+from fastapi import HTTPException
+from hub_core import Jellyfin
+from server_http import HttpPool, ResultCache
+from server_runtime import RuntimeGovernor, WorkDeferred, lower_worker_priority
+
+
+class RequestTests(unittest.TestCase):
+    def test_reuses_real_connections_without_retaining_cookies_or_account_headers(self):
+        seen = []
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+            def do_GET(self):
+                seen.append((self.client_address[1], self.headers.get('Authorization'), self.headers.get('Cookie')))
+                self.send_response(200)
+                self.send_header('Content-Length', '2')
+                self.send_header('Set-Cookie', 'account=private')
+                self.end_headers()
+                self.wfile.write(b'{}')
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        pool = HttpPool()
+        try:
+            url = f'http://127.0.0.1:{server.server_port}/'
+            for account in ('first', 'second'):
+                with pool.request('GET', url, headers={'Authorization': account}, timeout=3) as response:
+                    self.assertEqual(response.json(), {})
+            self.assertEqual(seen[0][0], seen[1][0])
+            self.assertEqual([value[1:] for value in seen], [('first', None), ('second', None)])
+            self.assertEqual(pool.status()['requests'], 2)
+        finally:
+            pool.close()
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_concurrent_queries_share_one_lookup_and_return_independent_data(self):
+        cache, entered, release = ResultCache(), threading.Event(), threading.Event()
+        calls = []
+        def load():
+            calls.append(True)
+            entered.set()
+            release.wait(3)
+            return [{'name': 'original'}]
+        with ThreadPoolExecutor(max_workers=20) as executor:
+            futures = [executor.submit(cache.get, ('account', 'song'), load) for _ in range(20)]
+            self.assertTrue(entered.wait(2))
+            deadline = time.monotonic() + 2
+            while cache.status()['shared'] < 19 and time.monotonic() < deadline:
+                time.sleep(.005)
+            release.set()
+            results = [future.result(timeout=3) for future in futures]
+        self.assertEqual(len(calls), 1)
+        results[0][0]['name'] = 'modified'
+        self.assertEqual(cache.get(('account', 'song'), load)[0]['name'], 'original')
+
+    def test_metadata_is_account_scoped_expires_and_does_not_freeze_random_or_favourites(self):
+        now = [1000]
+        client = Jellyfin('http://jellyfin', 'private', [], '/music')
+        client.metadata = ResultCache(clock=lambda: now[0])
+        client.json = Mock(return_value={'Items': [{'Id': 'c' * 32, 'Type': 'Audio'}]})
+        for owner in ('a' * 32, 'a' * 32, 'b' * 32):
+            client.items(owner, ids=['c' * 32])
+        self.assertEqual(client.json.call_count, 2)
+        now[0] += 6
+        client.items('a' * 32, ids=['c' * 32])
+        self.assertEqual(client.json.call_count, 3)
+        for _ in range(2):
+            client.items('a' * 32, random=True)
+            client.items('a' * 32, favorites=True)
+        self.assertEqual(client.json.call_count, 7)
+        client.http.close()
+
+    def test_cache_is_bounded_and_failures_remain_retryable(self):
+        cache = ResultCache(entries=4, items=7)
+        for i in range(1000):
+            cache.get(i, lambda: [1, 2, 3])
+        self.assertLessEqual(cache.status()['items'], 7)
+        self.assertLessEqual(cache.status()['entries'], 4)
+        failing = Mock(side_effect=HTTPException(401, 'Sign in again'))
+        for _ in range(2):
+            with self.assertRaises(HTTPException):
+                cache.get('failed-account', failing)
+        self.assertEqual(failing.call_count, 2)
+        self.assertEqual(cache.status()['pending'], 0)
+
+
+class GovernorTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.now = 1000
+        self.sample = {'cpus': 4, 'load': [1, 1, 1], 'memoryTotal': 3 * 1024**3,
+            'memoryAvailable': 2 * 1024**3, 'diskFree': 20 * 1024**3,
+            'diskTotal': 40 * 1024**3, 'pressure': {'cpu': 0, 'memory': 0, 'io': 0}}
+        self.gov = RuntimeGovernor(self.temp.name, playback=lambda: 1,
+            probe=lambda _: self.sample, clock=lambda: self.now)
+        self.gov.refresh()
+
+    def test_pressure_and_low_space_defer_new_jobs_without_rejecting_healthy_playback(self):
+        self.assertIsNone(self.gov.reason('analysis'))
+        self.sample['pressure']['io'] = 3
+        self.assertIn('disk activity', self.gov.reason('analysis'))
+        self.sample['pressure']['io'] = 0
+        self.sample['memoryAvailable'] = 1000 * 1024**2
+        self.assertIn('memory', self.gov.reason('karaoke'))
+        self.assertIsNone(self.gov.reason('analysis'))
+        self.sample['diskFree'] = 1024**3
+        self.assertIn('working space', self.gov.reason('analysis'))
+
+    def test_unknown_playback_is_not_treated_as_idle_and_stale_workers_are_not_reported_running(self):
+        with self.gov.slot('analysis'):
+            self.assertEqual(self.gov.status()['workers'][0]['state'], 'running')
+        self.now += 21
+        self.assertIn('playback status', self.gov.reason('analysis'))
+        self.assertEqual(self.gov.status()['workers'], [])
+
+    def test_shared_lease_excludes_another_process_and_is_released_after_failure(self):
+        descriptor, reason = self.gov.try_acquire('analysis')
+        self.assertIsNone(reason)
+        script = '''import json,sys
+from server_runtime import RuntimeGovernor
+g=RuntimeGovernor(sys.argv[1],role='karaoke',clock=lambda:1000)
+g.sample=json.loads(sys.argv[2])
+lease,reason=g.try_acquire('karaoke')
+print(json.dumps({'acquired':lease is not None,'reason':reason}))
+if lease is not None:g.release('karaoke',lease)
+'''
+        try:
+            output = subprocess.check_output([sys.executable, '-c', script, self.temp.name, json.dumps(self.sample)], text=True, timeout=10)
+            self.assertFalse(json.loads(output)['acquired'])
+        finally:
+            self.gov.release('analysis', descriptor)
+        # The waiting karaoke must be able to take the released lease.
+        worker = RuntimeGovernor(self.temp.name, role='karaoke', probe=lambda _: self.sample, clock=lambda: self.now)
+        with self.assertRaises(ValueError):
+            with worker.slot('karaoke'):
+                raise ValueError('worker failed')
+        with self.gov.slot('loudness'):
+            self.assertEqual(self.gov.states['loudness']['state'], 'running')
+
+    def test_demand_and_upcoming_priorities_are_bounded_and_do_not_reorder_album_members(self):
+        a, b, c = 'a' * 32, 'b' * 32, 'c' * 32
+        self.gov.priority_loader = lambda: [b]
+        self.gov.request_analysis([c], 'loudness')
+        self.assertEqual(self.gov.prioritize([a, b, c], lambda value: value), [c, b, a])
+        albums = [[a], [a, b]]
+        self.assertEqual(self.gov.prioritize(albums, lambda values: values), [[a, b], [a]])
+        self.assertEqual(albums, [[a], [a, b]])
+        self.gov.scan_events['loudness'].clear()
+        self.gov.request_analysis([c], 'loudness')
+        self.assertFalse(self.gov.scan_events['loudness'].is_set())
+        for i in range(1300):
+            self.gov.request_analysis([f'{i:032x}'], 'analysis')
+        self.assertLessEqual(len(self.gov.demands), 1024)
+
+    def test_stop_unblocks_deferred_work_without_publishing_a_measurement_failure(self):
+        self.gov.stop.set()
+        with self.assertRaises(WorkDeferred):
+            with self.gov.slot('loudness'):
+                self.fail('Stopped work must not start')
+
+    def test_background_priority_leaves_the_api_thread_unchanged(self):
+        original = os.getpriority(os.PRIO_PROCESS, threading.get_native_id())
+        observed = []
+        def background():
+            lower_worker_priority()
+            observed.append(os.getpriority(os.PRIO_PROCESS, threading.get_native_id()))
+        thread = threading.Thread(target=background)
+        thread.start()
+        thread.join(timeout=3)
+        self.assertEqual(observed, [10])
+        self.assertEqual(os.getpriority(os.PRIO_PROCESS, threading.get_native_id()), original)
+
+    def test_unavailable_library_retries_gradually_then_returns_to_normal_schedule(self):
+        scan = Mock(side_effect=[ConnectionError(), ConnectionError(), None])
+        delays = []
+        def wait(group, delay):
+            delays.append(delay)
+            return len(delays) < 3
+        self.gov.wait_scan = wait
+        self.gov.run_scans('analysis', scan, 21600, Mock())
+        self.assertEqual(delays, [60, 120, 21600])
+
+
+class ApplicationTests(unittest.TestCase):
+    def test_advanced_lifespan_does_not_import_torch_at_startup(self):
+        import asyncio
+        import builtins
+        import app
+        original_import = builtins.__import__
+        def guarded(name, *args, **kwargs):
+            if name == 'torch' or name.startswith('torch.'):
+                self.fail('Startup imported PyTorch')
+            return original_import(name, *args, **kwargs)
+        async def startup():
+            async with app.lifespan(app.app):
+                pass
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.multiple(app, DATA_DIR=folder, ADVANCED_ANALYSIS=True, HUB=Mock(), RUNTIME=Mock(), INDEX=Mock()), \
+                patch('app.threading.Thread'), patch('app.LoudnessIndex'), \
+                patch.object(builtins, '__import__', side_effect=guarded):
+            asyncio.run(startup())
+            app.DB.close()
+
+    def test_real_lifespan_exposes_authorized_runtime_status_without_changing_existing_audio_routes(self):
+        from fastapi.testclient import TestClient
+        owner = 'a' * 32
+        class Handler(BaseHTTPRequestHandler):
+            protocol_version = 'HTTP/1.1'
+            def do_GET(self):
+                route = self.path.split('?')[0]
+                value = [] if route == '/Sessions' else {'Items': []}
+                if route == '/Users/Me':
+                    value = {'Id': owner, 'Name': 'Listener', 'Policy': {'IsAdministrator': True}}
+                body = json.dumps(value).encode()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            def log_message(self, *args):
+                pass
+        server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {
+                'DATA_DIR': folder, 'ADVANCED_ANALYSIS': 'false', 'ANALYZER_TOKEN': 'private',
+                'JELLYFIN_URL': f'http://127.0.0.1:{server.server_port}', 'JELLYFIN_API_KEY': 'private',
+            }):
+                import importlib
+                application = importlib.import_module('app')
+                application.HUB.store.save_settings({'owner': owner, 'backupEnabled': False,
+                    'nightlyEnabled': False, 'healthEnabled': False})
+                headers = {'X-Api-Key': 'private', 'X-Jellyfin-Token': 'account'}
+                with TestClient(application.app) as client:
+                    self.assertEqual(client.get('/status', headers=headers).status_code, 200)
+                    self.assertEqual(client.get('/hub/api/runtime').status_code, 401)
+                    report = client.get('/hub/api/runtime', headers=headers)
+                    self.assertEqual(report.status_code, 200, report.text)
+                    self.assertIn('machine', report.json())
+                    self.assertNotIn('private', report.text)
+                    self.assertEqual(client.post('/loudness', headers=headers, json={'ids': []}).json(), {})
+                    self.assertEqual(client.post('/analysis', headers=headers, json={'ids': []}).json(), {})
+                self.assertTrue(application.RUNTIME.stop.is_set())
+                application.DB.close()
+                application.LOUDNESS.connection.close()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_api_refuses_requests_without_a_real_token_and_logs_no_tickets(self):
+        import importlib
+        import logging
+        from fastapi import HTTPException
+        from fastapi.testclient import TestClient
+        # The settings are read on import; other tests import it again with their own.
+        self.addCleanup(sys.modules.pop, 'app', None)
+        with tempfile.TemporaryDirectory() as folder, patch.dict(os.environ, {'DATA_DIR': folder, 'ADVANCED_ANALYSIS': 'false'}):
+            application = importlib.import_module('app')
+            for token in ['', 'change-me', 'change-me-too']:
+                with patch.object(application, 'ANALYZER_TOKEN', token):
+                    with self.assertRaises(HTTPException): application.authorize(token)
+            with patch.object(application, 'ANALYZER_TOKEN', 'a-long-private-test-secret'):
+                application.authorize('a-long-private-test-secret')
+                with self.assertRaises(HTTPException): application.authorize('a-long-private-test-secre')
+                client = TestClient(application.app)
+                self.assertEqual(client.get('/healthz').json(), {'ok': True})
+                response = client.post('/identify', headers={'X-Api-Key': 'a-long-private-test-secret'},
+                    content=b'x' * (application.MAX_RECORDING_BYTES + 1))
+                self.assertEqual(response.status_code, 413)
+        record = logging.LogRecord('uvicorn.access', logging.INFO, '', 0, '%s "%s %s HTTP/%s" %d',
+            ('10.0.0.2:5000', 'GET', '/hub/api/radio/stream/eyJrIjoxfQ.c2ln?x=1', '1.1', 200), None)
+        application.HideTickets().filter(record)
+        self.assertNotIn('eyJrIjoxfQ', record.getMessage())
+        self.assertIn('/hub/api/radio/stream/', record.getMessage())
+        record.args = ('10.0.0.2:5000', 'GET', '/hub/api/room/qr?ticket=secret&url=http://tv/%23secret', '1.1', 200)
+        application.HideTickets().filter(record)
+        self.assertNotIn('secret', record.getMessage())
+
+
+class HealthCacheTests(unittest.TestCase):
+    def test_duplicate_cache_tracks_content_changes_while_health_stays_fresh(self):
+        import app
+        import numpy as np
+        from loudness import LoudnessIndex
+        with tempfile.TemporaryDirectory() as folder, patch.object(app, 'DATA_DIR', folder):
+            database = app.db()
+            self.addCleanup(database.close)
+            loudness = LoudnessIndex(folder, '', '', folder, lambda path: path)
+            self.addCleanup(loudness.connection.close)
+            index = app.Index()
+            embedding = np.array([1, 0], dtype=np.float32).tobytes()
+            fingerprint = np.ones(40, dtype=np.uint32).tobytes()
+            database.executemany('INSERT INTO tracks(id,path,mtime,embedding,fingerprint) VALUES(?,?,?,?,?)',
+                [(value, value, 1, embedding, fingerprint) for value in ('a', 'b')])
+            database.commit()
+            with patch.multiple(app, DB=database, INDEX=index, LOUDNESS=loudness, ADVANCED_ANALYSIS=True, JELLYFIN_URL='test'), \
+                    patch.object(app, 'library_items', return_value=[]) as items, \
+                    patch('structure.same_recording', wraps=app.structure.same_recording) as compare:
+                index.reload()
+                self.assertEqual(app.health()['duplicates'], [['a', 'b']])
+                self.assertEqual(compare.call_count, 1)
+                database.execute("UPDATE tracks SET bpm=120,mtime=2")
+                database.commit()
+                index.reload()
+                app.health()
+                self.assertEqual(compare.call_count, 1)
+                database.execute("INSERT INTO tracks(id,path,mtime,error) VALUES('bad','bad',1,'decoder error')")
+                database.commit()
+                items.return_value = [{'Id': 'tags'}]
+                report = app.health()
+                self.assertEqual(report['broken'][0]['id'], 'bad')
+                self.assertEqual(report['missingTags'][0]['id'], 'tags')
+                database.execute("UPDATE tracks SET fingerprint=? WHERE id='b'", (np.zeros(40, dtype=np.uint32).tobytes(),))
+                database.commit()
+                index.reload()
+                app.health()
+                self.assertEqual(compare.call_count, 2)
+                database.execute("UPDATE tracks SET embedding=? WHERE id='b'", (np.array([0, 1], dtype=np.float32).tobytes(),))
+                database.commit()
+                index.reload()
+                self.assertEqual(app.health()['duplicates'], [])
+                database.execute("INSERT INTO tracks(id,path,mtime,embedding,fingerprint) VALUES('c','c',1,?,?)", (embedding, fingerprint))
+                database.commit()
+                index.reload()
+                self.assertEqual(app.health()['duplicates'], [['a', 'c']])
+                database.execute("DELETE FROM tracks WHERE id='c'")
+                database.commit()
+                index.reload()
+                self.assertEqual(app.health()['duplicates'], [])
+
+
+class ClapTests(unittest.TestCase):
+    def setUp(self):
+        import app
+        self.application = app
+        self.model, self.processor = Mock(), Mock(return_value={})
+        self.clap = (self.model, self.processor)
+        self.clock = Mock()
+        self.clock.monotonic.return_value = 100
+        state = patch.multiple(app, _clap=self.clap, _clap_used=0, _clap_users=0,
+            CLAP_IDLE_SECONDS=10, time=self.clock)
+        state.start()
+        self.addCleanup(state.stop)
+        torch = Mock()
+        torch.no_grad.return_value = nullcontext()
+        modules = patch.dict(sys.modules, {'torch': torch})
+        modules.start()
+        self.addCleanup(modules.stop)
+
+    def test_idle_model_is_released_while_scan_waits_for_memory(self):
+        app = self.application
+        with tempfile.TemporaryDirectory() as folder, patch.object(app, 'DATA_DIR', folder):
+            source = Path(folder) / 'song.wav'
+            source.write_bytes(b'music')
+            database = app.db()
+            runtime = RuntimeGovernor(folder)
+            runtime.sample = {'diskFree': 20 * 1024**3, 'memoryAvailable': 0}
+            ticks = iter([False, True])
+            def wait(seconds):
+                if seconds == 300:
+                    return next(ticks)
+                self.assertEqual(seconds, 1)
+                self.assertTrue(app.INDEX.scanning)
+                self.assertEqual(runtime.states['analysis']['state'], 'waiting')
+                self.assertIn('memory', runtime.states['analysis']['message'])
+                app.clap_loop()
+                runtime.stop.set()
+                return True
+            try:
+                with patch.multiple(app, DB=database, INDEX=app.Index(), RUNTIME=runtime), \
+                        patch.object(app, 'library_tracks', return_value={'a' * 32: str(source)}), \
+                        patch.object(app, 'analyze') as analyze, patch.object(runtime.stop, 'wait', side_effect=wait):
+                    app.scan()
+                    # scan() catches per-track errors; check eviction after it returns.
+                    self.assertIsNone(app._clap)
+                    self.assertFalse(app.INDEX.scanning)
+                    analyze.assert_not_called()
+                self.assertTrue(runtime.stop.is_set())
+            finally:
+                database.close()
+
+    def test_audio_and_text_inference_keep_model_loaded_until_they_finish(self):
+        app = self.application
+        def features(**inputs):
+            self.clock.monotonic.return_value = 200
+            app.release_idle_clap()
+            self.assertIs(app._clap, self.clap)
+            return Mock(numpy=Mock(return_value=app.np.array([[3., 4.]])))
+        self.model.get_audio_features.side_effect = features
+        self.model.get_text_features.side_effect = features
+        for embed, value in [(app.audio_embedding, app.np.zeros(app.SAMPLE_RATE)), (app.text_embedding, 'quiet music')]:
+            with self.subTest(inference=embed.__name__):
+                app._clap, app._clap_used = self.clap, 0
+                self.clock.monotonic.return_value = 100
+                app.np.testing.assert_allclose(embed(value), [.6, .8])
+                self.assertEqual(app._clap_users, 0)
+                self.assertEqual(app._clap_used, 200)
+                app.release_idle_clap()
+                self.assertIs(app._clap, self.clap)
+                self.clock.monotonic.return_value = 211
+                app.release_idle_clap()
+                self.assertIsNone(app._clap)
+
+    def test_first_model_load_sets_one_thread_before_loading_or_inference(self):
+        app = self.application
+        app._clap = None
+        torch = sys.modules['torch']
+        transformers = Mock()
+        def load(_):
+            torch.set_num_threads.assert_called_once_with(1)
+            return self.model
+        transformers.ClapModel.from_pretrained.side_effect = load
+        with patch.dict(sys.modules, {'transformers': transformers}):
+            with app.clap():
+                self.assertEqual(app._clap_users, 1)
+            with app.clap():
+                pass
+        torch.set_num_threads.assert_called_once_with(1)
+        transformers.ClapModel.from_pretrained.assert_called_once()
+
+    def test_failed_inference_does_not_prevent_later_eviction(self):
+        app = self.application
+        self.model.get_text_features.side_effect = RuntimeError('Inference failed')
+        with self.assertRaises(RuntimeError):
+            app.text_embedding('quiet music')
+        self.assertEqual(app._clap_users, 0)
+        self.assertEqual(app._clap_used, 100)
+        self.clock.monotonic.return_value = 111
+        app.release_idle_clap()
+        self.assertIsNone(app._clap)
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,0 +1,30 @@
+# Everything is left out except the files below. They're named one by one: a wildcard here makes Docker look inside
+# every folder, including data/, whose root-owned folders a normal user can't read, which stops the build.
+*
+!Dockerfile
+!Dockerfile.karaoke
+!entrypoint.sh
+!app.py
+!hub.py
+!hub_core.py
+!hub_jobs.py
+!hub_radio.py
+!hub_sync.py
+!karaoke.py
+!karaoke_proxy.py
+!karaoke_worker.py
+!loudness.py
+!server_auth.py
+!server_http.py
+!server_runtime.py
+!structure.py
+!test_hub.py
+!test_karaoke.py
+!test_karaoke_worker.py
+!test_loudness.py
+!test_server_runtime.py
+!test_structure.py
+!requirements.txt
+!requirements-loudness.txt
+!requirements-test.txt
+!hub_web
