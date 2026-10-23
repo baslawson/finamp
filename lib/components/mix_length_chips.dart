@@ -1,3 +1,4 @@
+import 'package:finamp/components/fun_heading.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/models/jellyfin_models.dart';
 import 'package:flutter/cupertino.dart';
@@ -112,19 +113,28 @@ class MixLengthChips extends StatelessWidget {
       runSpacing: 4.0,
       children: [
         if (anyLabel != null)
-          ChoiceChip(label: Text(anyLabel!), selected: minutes == null, onSelected: (_) => onChanged(null)),
+          SelectionPop(
+            selected: minutes == null,
+            child: ChoiceChip(label: Text(anyLabel!), selected: minutes == null, onSelected: (_) => onChanged(null)),
+          ),
         for (final length in mixLengths)
-          ChoiceChip(
-            label: Text(mixLengthLabel(context, length)),
+          SelectionPop(
             selected: minutes == length,
-            onSelected: (_) => onChanged(length),
+            child: ChoiceChip(
+              label: Text(mixLengthLabel(context, length)),
+              selected: minutes == length,
+              onSelected: (_) => onChanged(length),
+            ),
           ),
         // Shows the chosen length once there is one; tapping it again changes it.
-        ChoiceChip(
-          avatar: const Icon(TablerIcons.adjustments_horizontal),
-          label: Text(custom ? mixLengthLabel(context, minutes!) : context.l10n.aiDjCustom),
+        SelectionPop(
           selected: custom,
-          onSelected: (_) => _pickCustomLength(context),
+          child: ChoiceChip(
+            avatar: const Icon(TablerIcons.adjustments_horizontal),
+            label: Text(custom ? mixLengthLabel(context, minutes!) : context.l10n.aiDjCustom),
+            selected: custom,
+            onSelected: (_) => _pickCustomLength(context),
+          ),
         ),
       ],
     );

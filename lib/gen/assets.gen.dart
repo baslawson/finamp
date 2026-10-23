@@ -33,6 +33,13 @@ class $ImagesGen {
   List<dynamic> get values => [albumWhite, finamp, finampCroppedPng, finampCroppedSvg, jellyfinIconTransparent];
 }
 
+class $AssetsFontsGen {
+  const $AssetsFontsGen();
+
+  /// Directory path: assets/fonts/outfit
+  $AssetsFontsOutfitGen get outfit => const $AssetsFontsOutfitGen();
+}
+
 class $AssetsIconGen {
   const $AssetsIconGen();
 
@@ -52,9 +59,20 @@ class $AssetsIconGen {
   List<AssetGenImage> get values => [iconCombined, iconSquareBgBlack, iconSquareBgWhite, iconWhiteNoborder];
 }
 
+class $AssetsFontsOutfitGen {
+  const $AssetsFontsOutfitGen();
+
+  /// File path: assets/fonts/outfit/OFL.txt
+  String get ofl => 'assets/fonts/outfit/OFL.txt';
+
+  /// List of all assets
+  List<String> get values => [ofl];
+}
+
 class Assets {
   const Assets._();
 
+  static const $AssetsFontsGen fonts = $AssetsFontsGen();
   static const $AssetsIconGen icon = $AssetsIconGen();
   static const $ImagesGen images = $ImagesGen();
 }

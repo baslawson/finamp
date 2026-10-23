@@ -16,6 +16,7 @@ import 'package:background_downloader/background_downloader.dart';
 import 'package:collection/collection.dart';
 import 'package:finamp/color_schemes.g.dart';
 import 'package:finamp/components/Buttons/cta_medium.dart';
+import 'package:finamp/components/fun_heading.dart';
 import 'package:finamp/gen/assets.gen.dart';
 import 'package:finamp/hive_registrar.g.dart';
 import 'package:finamp/l10n/app_localizations.dart';
@@ -191,6 +192,10 @@ Future<void> main(List<String> args, {bool integrationTesting = false, bool logi
 
   try {
     startTime = DateTime.now();
+    // The bundled heading font's licence, for the licences page.
+    LicenseRegistry.addLicense(() async* {
+      yield LicenseEntryWithLineBreaks([headingFontFamily], await rootBundle.loadString(Assets.fonts.outfit.ofl));
+    });
     await setupLogging();
     await _setupEdgeToEdgeOverlayStyle();
     _mainLog.info("Setup edge-to-edge overlay");
@@ -1176,45 +1181,49 @@ class FinampApp extends ConsumerWidget {
       initialRoute: SplashScreen.routeName,
       navigatorObservers: [SplitScreenNavigatorObserver(), KeepScreenOnObserver()],
       builder: buildPlayerSplitScreenScaffold,
-      theme: ThemeData(
-        brightness: Brightness.light,
-        colorScheme: getColorScheme(accentColor, Brightness.light, amoledTheme),
-        appBarTheme: const AppBarThemeData(
-          systemOverlayStyle: SystemUiOverlayStyle(
-            statusBarBrightness: Brightness.light,
-            statusBarIconBrightness: Brightness.dark,
-            systemNavigationBarIconBrightness: Brightness.dark,
+      theme: withBoldHeadings(
+        ThemeData(
+          brightness: Brightness.light,
+          colorScheme: getColorScheme(accentColor, Brightness.light, amoledTheme),
+          appBarTheme: const AppBarThemeData(
+            systemOverlayStyle: SystemUiOverlayStyle(
+              statusBarBrightness: Brightness.light,
+              statusBarIconBrightness: Brightness.dark,
+              systemNavigationBarIconBrightness: Brightness.dark,
+            ),
           ),
+          snackBarTheme: const SnackBarThemeData(
+            //TODO get rid of floating action buttons and re-enable the floating behavior and insetPadding
+            // behavior: SnackBarBehavior.floating,
+            elevation: 10.0,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12.0))),
+            // insetPadding: EdgeInsets.symmetric(
+            //   horizontal: 12.0,
+            //   vertical: 0.0,
+            // ),
+            dismissDirection: DismissDirection.horizontal,
+          ),
+          tooltipTheme: const TooltipThemeData(waitDuration: Duration(milliseconds: 800), preferBelow: false),
+          pageTransitionsTheme: transitionBuilder,
         ),
-        snackBarTheme: const SnackBarThemeData(
-          //TODO get rid of floating action buttons and re-enable the floating behavior and insetPadding
-          // behavior: SnackBarBehavior.floating,
-          elevation: 10.0,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12.0))),
-          // insetPadding: EdgeInsets.symmetric(
-          //   horizontal: 12.0,
-          //   vertical: 0.0,
-          // ),
-          dismissDirection: DismissDirection.horizontal,
-        ),
-        tooltipTheme: const TooltipThemeData(waitDuration: Duration(milliseconds: 800), preferBelow: false),
-        pageTransitionsTheme: transitionBuilder,
       ),
-      darkTheme: ThemeData(
-        brightness: Brightness.dark,
-        colorScheme: getColorScheme(accentColor, Brightness.dark, amoledTheme),
-        snackBarTheme: const SnackBarThemeData(
-          //TODO get rid of floating action buttons and re-enable the floating behavior and insetPadding
-          // behavior: SnackBarBehavior.floating,
-          elevation: 10.0,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12.0))),
-          // insetPadding: EdgeInsets.symmetric(
-          //   horizontal: 12.0,
-          //   vertical: 0.0,
-          // ),
-          dismissDirection: DismissDirection.horizontal,
+      darkTheme: withBoldHeadings(
+        ThemeData(
+          brightness: Brightness.dark,
+          colorScheme: getColorScheme(accentColor, Brightness.dark, amoledTheme),
+          snackBarTheme: const SnackBarThemeData(
+            //TODO get rid of floating action buttons and re-enable the floating behavior and insetPadding
+            // behavior: SnackBarBehavior.floating,
+            elevation: 10.0,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.all(Radius.circular(12.0))),
+            // insetPadding: EdgeInsets.symmetric(
+            //   horizontal: 12.0,
+            //   vertical: 0.0,
+            // ),
+            dismissDirection: DismissDirection.horizontal,
+          ),
+          pageTransitionsTheme: transitionBuilder,
         ),
-        pageTransitionsTheme: transitionBuilder,
       ),
       scrollBehavior: FinampScrollBehavior(),
       themeMode: themeMode,

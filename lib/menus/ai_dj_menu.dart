@@ -1,3 +1,4 @@
+import 'package:finamp/components/fun_heading.dart';
 import 'package:finamp/components/ai_voice_provider_controls.dart';
 import 'package:finamp/components/harmonic_mixing_switch.dart';
 import 'package:finamp/components/mix_length_chips.dart';
@@ -89,7 +90,6 @@ class _AiDjMenuState extends State<_AiDjMenu> {
 
   @override
   Widget build(BuildContext context) {
-    final textTheme = Theme.of(context).textTheme;
     final suggestions = [
       context.l10n.aiDjSuggestionChill,
       context.l10n.aiDjSuggestionFocus,
@@ -112,7 +112,7 @@ class _AiDjMenuState extends State<_AiDjMenu> {
             children: [
               Row(
                 children: [
-                  Expanded(child: Text(context.l10n.aiDjAction, style: textTheme.titleLarge)),
+                  Expanded(child: GradientTitle(context.l10n.aiDjAction, icon: TablerIcons.headphones)),
                   IconButton(
                     tooltip: context.l10n.djVoice,
                     icon: const Icon(TablerIcons.microphone_2),

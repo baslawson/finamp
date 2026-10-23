@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:finamp/components/MusicScreen/item_wrapper.dart';
+import 'package:finamp/components/fun_heading.dart';
 import 'package:finamp/components/voice_control_button.dart';
 import 'package:finamp/components/finamp_app_bar_back_button.dart';
 import 'package:finamp/components/finamp_icon.dart';
@@ -239,13 +240,11 @@ class FinampMusicScreenHeader extends ConsumerWidget implements PreferredSizeWid
                         future: PackageInfo.fromPlatform(),
                         builder: (context, asyncSnapshot) {
                           final appName = asyncSnapshot.data?.appName ?? AppLocalizations.of(context)!.finamp;
-                          return Text(
+                          return GradientTitle(
                             singleTabConfig?.getTitle(context.l10n) ??
                                 finampUserHelper.currentUser?.currentView?.name ??
                                 appName,
-                            style: TextStyle(fontSize: 20),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                            style: TextTheme.of(context).titleLarge?.copyWith(fontSize: 22),
                           );
                         },
                       ),

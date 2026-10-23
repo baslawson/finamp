@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:collection/collection.dart';
+import 'package:finamp/components/fun_heading.dart';
 import 'package:finamp/components/AudioServiceSettingsScreen/shuffle_randomness_slider.dart';
 import 'package:finamp/components/global_snackbar.dart';
 import 'package:finamp/components/harmonic_mixing_switch.dart';
@@ -232,7 +233,7 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   spacing: 8.0,
                   children: [
-                    Text(context.l10n.smartShuffleAction, style: textTheme.titleLarge),
+                    GradientTitle(context.l10n.smartShuffleAction, icon: TablerIcons.arrows_shuffle),
                     const ShuffleRandomnessSlider(padding: EdgeInsets.symmetric(vertical: 8)),
                     const HarmonicMixingSwitch(menu: HarmonicMixingMenu.smartShuffle),
                     Text(context.l10n.smartShuffleLength, style: textTheme.titleSmall),

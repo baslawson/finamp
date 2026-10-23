@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:finamp/components/AlbumScreen/track_list_tile.dart';
+import 'package:finamp/components/fun_heading.dart';
 import 'package:finamp/models/finamp_models.dart';
 import 'package:finamp/services/finamp_settings_helper.dart';
 import 'package:flutter/material.dart';
@@ -102,14 +103,24 @@ class FinampSectionHeader extends ConsumerWidget {
                         child: Padding(
                           padding: hoverPadding,
                           child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.end,
+                            crossAxisAlignment: CrossAxisAlignment.center,
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              // An accent bar so section titles stand out from the items below them.
+                              Container(
+                                width: 4.0,
+                                height: 18.0,
+                                margin: const EdgeInsets.only(right: 8.0),
+                                decoration: BoxDecoration(
+                                  color: ColorScheme.of(context).primary,
+                                  borderRadius: BorderRadius.circular(2.0),
+                                ),
+                              ),
                               Flexible(
                                 child: Text(
                                   title,
                                   semanticsLabel: label,
-                                  style: TextTheme.of(context).titleMedium,
+                                  style: sectionHeadingStyle(context),
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                 ),

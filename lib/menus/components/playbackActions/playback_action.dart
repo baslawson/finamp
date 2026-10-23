@@ -15,6 +15,7 @@ class PlaybackAction extends ConsumerWidget {
     this.enabled = true,
     this.addShuffleIcon = false,
     this.compactLayout = false,
+    this.glow = false,
   });
 
   final IconData icon;
@@ -27,14 +28,23 @@ class PlaybackAction extends ConsumerWidget {
   final bool addShuffleIcon;
   final bool compactLayout;
 
+  /// A soft halo in [iconColor] behind the icon, for a mode that's on.
+  final bool glow;
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final double mainSize = 28;
     final double badgeSize = mainSize * 0.5;
 
-    final iconWidget = SizedBox(
+    final iconWidget = Container(
       width: mainSize,
       height: mainSize,
+      decoration: glow && enabled
+          ? BoxDecoration(
+              shape: BoxShape.circle,
+              boxShadow: [BoxShadow(color: iconColor.withValues(alpha: 0.45), blurRadius: 16.0, spreadRadius: 2.0)],
+            )
+          : null,
       child: Stack(
         clipBehavior: Clip.none,
         children: [

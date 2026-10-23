@@ -1,3 +1,4 @@
+import 'package:finamp/components/fun_heading.dart';
 import 'package:finamp/components/global_snackbar.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/menus/components/playbackActions/playback_action.dart';
@@ -42,6 +43,7 @@ class HarmonicOrderAction extends StatelessWidget {
           onLongPress: () => showPlayOrderMenu(context),
           label: context.l10n.harmonicOrderButtonLabel,
           iconColor: on ? iconColor : Theme.of(context).textTheme.bodyMedium?.color ?? Colors.white,
+          glow: on,
         );
       },
     );
@@ -106,7 +108,7 @@ class _PlayOrderMenu extends ConsumerWidget {
             children: [
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: Text(context.l10n.playOrderMenuTitle, style: Theme.of(context).textTheme.titleLarge),
+                child: GradientTitle(context.l10n.playOrderMenuTitle, icon: TablerIcons.wave_sine),
               ),
               option(
                 _PlayOrder.inOrder,
