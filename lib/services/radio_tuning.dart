@@ -6,6 +6,10 @@ import 'package:finamp/services/dj_transition_service.dart';
 import 'package:finamp/services/skip_service.dart';
 import 'package:finamp/services/shuffle_randomness.dart';
 import 'package:finamp/services/finamp_settings_helper.dart';
+import 'package:finamp/services/artist_spacing.dart';
+import 'package:finamp/services/listening_hour.dart';
+import 'package:finamp/services/radio_clock_settings.dart';
+import 'package:finamp/services/radio_time_of_day.dart';
 import 'package:finamp/models/finamp_models.dart';
 import 'package:flutter/foundation.dart';
 import 'package:logging/logging.dart';
@@ -78,10 +82,18 @@ class RadioTuning {
   /// How long to wait for fresh analysis before ordering with what's already cached.
   static const analysisWait = Duration(milliseconds: 1500);
 
-  static Future<List<BaseItemDto>> order(BaseItemDto seed, List<BaseItemDto> candidates, {Random? random}) async {
+  static Future<List<BaseItemDto>> order(
+    BaseItemDto seed,
+    List<BaseItemDto> candidates, {
+    Random? random,
+    DateTime Function()? now,
+  }) async {
     final chance = await SkipService.chanceToPlay();
+    final matchTime = await RadioClockSettings.load();
+    final time = (now ?? DateTime.now)();
+    final skips = matchTime ? (await SkipService.atHour(time)).take(100).toList() : <SkipRecord>[];
     Map<String, TrackAnalysis> analysis = const {};
-    final ids = [seed.id.raw, for (final track in candidates) track.id.raw];
+    final ids = [seed.id.raw, for (final track in candidates) track.id.raw, for (final skip in skips) skip.trackId];
     try {
       if (await AnalyzerService.isConfigured()) {
         // A cold analysis can take a while. Rather than lose all tuning (skips included), use what's already known;
@@ -96,11 +108,31 @@ class RadioTuning {
     final seedAnalysis = analysis[seed.id.raw];
     final harmonic = HarmonicMixing.enabled;
     final strictness = harmonic ? harmonicStrictness(HarmonicMixing.strength.value) : 0.25;
+    final clock = RadioTimeOfDay(
+      hour: time.hour,
+      skips: [
+        for (final skip in skips)
+          (
+            trackId: skip.trackId,
+            // The same identity candidates are judged by; older skips only know the name shown.
+            artist: skip.artistKey ?? skip.artist,
+            energy: analysis[skip.trackId]?.energy,
+            weight: skip.hourWeight(listeningHour(time.hour), time),
+          ),
+      ],
+    );
     double weight(BaseItemDto track) {
       var weight = chance(track.id.raw);
       final trackAnalysis = analysis[track.id.raw];
       if (seedAnalysis != null && trackAnalysis != null) {
         weight /= 1 + DjTransitionService.transitionCost(seedAnalysis, trackAnalysis) * strictness;
+      }
+      if (matchTime) {
+        weight *= clock.weight(
+          trackId: track.id.raw,
+          artist: ArtistSpacing.artistKey(track),
+          energy: trackAnalysis?.energy,
+        );
       }
       return weight;
     }
@@ -111,7 +143,7 @@ class RadioTuning {
       randomness: FinampSettingsHelper.finampSettings.shuffleRandomness,
       // With harmonic mixing even a fully random order leans towards songs in a matching key and tempo, unless the
       // strength is 0%, which is the same as harmonic mixing off.
-      weightedRandom: harmonic && HarmonicMixing.strength.value > 0,
+      weightedRandom: matchTime || (harmonic && HarmonicMixing.strength.value > 0),
       random: random,
     );
   }

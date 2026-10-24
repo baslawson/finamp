@@ -919,6 +919,7 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
 
   @override
   Future<void> pause({bool disableFade = false}) async {
+    await CrossfadeService.interruptTempoMatching();
     _audioServiceBackgroundTaskLogger.info(
       "pause() start: disableFade=$disableFade, playing=${_player.playing}, fadeDirection=${fadeState.value.fadeDirection}, currentIndex=${_player.currentIndex}, position=${_player.position}",
     );
@@ -998,6 +999,7 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
   }
 
   Future<void> fadeOutAndPause() async {
+    await CrossfadeService.interruptTempoMatching();
     switch (fadeState.value.fadeDirection) {
       case FadeDirection.fadeOut:
         return;
@@ -1049,6 +1051,7 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
   }
 
   Future<void> stopPlayback() async {
+    await CrossfadeService.interruptTempoMatching();
     try {
       if (sleepTimer != null) {
         _audioServiceBackgroundTaskLogger.info("Stopping playback with active sleep timer");
@@ -1108,6 +1111,7 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
 
   @override
   Future<void> skipToPrevious({bool forceSkip = false}) async {
+    await CrossfadeService.interruptTempoMatching();
     _audioServiceBackgroundTaskLogger.fine(
       "skipToPrevious() start: forceSkip=$forceSkip, playing=${_player.playing}, fadeDirection=${fadeState.value.fadeDirection}, hasPrevious=${_player.hasPrevious}, loopMode=${_player.loopMode}, currentIndex=${_player.currentIndex}, position=${_player.position}",
     );
@@ -1189,6 +1193,7 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
 
   @override
   Future<void> skipToNext() async {
+    await CrossfadeService.interruptTempoMatching();
     _audioServiceBackgroundTaskLogger.fine(
       "skipToNext() start: playing=${_player.playing}, fadeDirection=${fadeState.value.fadeDirection}, hasNext=${_player.hasNext}, loopMode=${_player.loopMode}, currentIndex=${_player.currentIndex}, position=${_player.position}",
     );
@@ -1214,6 +1219,7 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
   }
 
   Future<void> skipByOffset(int offset, {bool userInitiated = true}) async {
+    await CrossfadeService.interruptTempoMatching();
     _audioServiceBackgroundTaskLogger.fine("skipping by offset: $offset");
     final navigation = _beginNavigation(
       offset > 0
@@ -1254,6 +1260,7 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
   }
 
   Future<void> skipToIndex(int index, {bool userInitiated = true}) async {
+    await CrossfadeService.interruptTempoMatching();
     _audioServiceBackgroundTaskLogger.fine("skipping to index: $index");
     final navigation = _beginNavigation(PlaybackNavigationKind.select, userInitiated: userInitiated);
 
@@ -1269,6 +1276,7 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
 
   @override
   Future<void> seek(Duration position, {bool userInitiated = true}) async {
+    if (!CrossfadeService.isHandoverSeek) await CrossfadeService.interruptTempoMatching();
     final navigation = userInitiated
         ? _beginNavigation(
             position == Duration.zero

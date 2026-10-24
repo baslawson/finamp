@@ -5,16 +5,43 @@ import 'dart:math';
 
 import 'package:logging/logging.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:finamp/services/listening_hour.dart';
+
+/// Counts in one hour band, with their own decay clock.
+class HourSkips {
+  HourSkips(this.count, this.last);
+  final double count;
+  final DateTime last;
+
+  double weightAt(DateTime now) =>
+      count *
+      pow(0.5, max(0, now.difference(last).inMilliseconds) / const Duration(days: 60).inMilliseconds).toDouble();
+}
 
 /// How often a track was skipped early, and when last.
 class SkipRecord {
-  SkipRecord({required this.trackId, required this.name, required this.artist, required this.count, required this.last});
+  SkipRecord({
+    required this.trackId,
+    required this.name,
+    required this.artist,
+    required this.count,
+    required this.last,
+    this.artistKey,
+    Map<ListeningHour, HourSkips>? hours,
+  }) : hours = hours ?? {};
 
   final String trackId;
   final String name;
+
+  /// The artist as shown.
   final String? artist;
+
+  /// The artist as Radio and artist spacing tell artists apart (see ArtistSpacing.artistKey), so a skip counts
+  /// against the same artist candidates are judged by. Unknown for skips recorded before it was kept.
+  String? artistKey;
   int count;
   DateTime last;
+  final Map<ListeningHour, HourSkips> hours;
 
   factory SkipRecord.fromJson(Map<String, dynamic> json) => SkipRecord(
     trackId: json["id"] as String,
@@ -22,15 +49,39 @@ class SkipRecord {
     artist: json["ar"] as String?,
     count: json["c"] as int? ?? 1,
     last: DateTime.fromMillisecondsSinceEpoch(json["t"] as int? ?? 0),
+    artistKey: json["ak"] as String?,
+    hours: {
+      for (final band in ListeningHour.values)
+        if (json['hours']?[band.name] case final Map<dynamic, dynamic> value)
+          band: HourSkips((value['c'] as num).toDouble(), DateTime.fromMillisecondsSinceEpoch(value['t'] as int)),
+    },
   );
 
   Map<String, dynamic> toJson() => {
     "id": trackId,
     "n": name,
     if (artist != null) "ar": artist,
+    if (artistKey != null) "ak": artistKey,
     "c": count,
     "t": last.millisecondsSinceEpoch,
+    if (hours.isNotEmpty)
+      'hours': {
+        for (final entry in hours.entries)
+          entry.key.name: {'c': entry.value.count, 't': entry.value.last.millisecondsSinceEpoch},
+      },
   };
+
+  /// Older files know only the latest skip's hour, not the hours of every skip.
+  double hourWeight(ListeningHour band, DateTime now) {
+    if (hours.isNotEmpty) return hours[band]?.weightAt(now) ?? 0;
+    return listeningHour(last.hour) == band ? HourSkips(1, last).weightAt(now) : 0;
+  }
+
+  void addHourSkip(DateTime now) {
+    if (hours.isEmpty && count > 0) hours[listeningHour(last.hour)] = HourSkips(1, last);
+    final band = listeningHour(now.hour);
+    hours[band] = HourSkips((hours[band]?.weightAt(now) ?? 0) + 1, now);
+  }
 }
 
 /// Learns which songs get skipped early, so shuffles and mixes can play them less often.
@@ -84,15 +135,31 @@ class SkipService {
     return played < limit;
   }
 
-  static Future<void> recordSkip({required String trackId, required String name, String? artist}) async {
+  static Future<void> recordSkip({
+    required String trackId,
+    required String name,
+    String? artist,
+    String? artistKey,
+  }) async {
     final records = await _load();
     final record = records[trackId];
+    final now = DateTime.now();
     if (record == null) {
-      records[trackId] = SkipRecord(trackId: trackId, name: name, artist: artist, count: 1, last: DateTime.now());
+      records[trackId] = SkipRecord(
+        trackId: trackId,
+        name: name,
+        artist: artist,
+        count: 1,
+        last: now,
+        artistKey: artistKey,
+        hours: {listeningHour(now.hour): HourSkips(1, now)},
+      );
     } else {
+      record.addHourSkip(now);
       record
-        ..count = weightOf(record, DateTime.now()).round() + 1
-        ..last = DateTime.now();
+        ..artistKey = artistKey ?? record.artistKey
+        ..count = weightOf(record, now).round() + 1
+        ..last = now;
     }
     await _save();
   }
@@ -120,6 +187,13 @@ class SkipService {
     final now = DateTime.now();
     return records.values.where((record) => weightOf(record, now) >= 0.5).toList()
       ..sort((a, b) => weightOf(b, now).compareTo(weightOf(a, now)));
+  }
+
+  /// A small snapshot for hour-aware Radio, including records whose other hours are newer.
+  static Future<List<SkipRecord>> atHour(DateTime now) async {
+    final band = listeningHour(now.hour);
+    return (await _load()).values.where((record) => record.hourWeight(band, now) >= 0.1).toList()
+      ..sort((a, b) => b.hourWeight(band, now).compareTo(a.hourWeight(band, now)));
   }
 
   static Future<void> forget(String trackId) async {

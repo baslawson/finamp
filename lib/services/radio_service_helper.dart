@@ -18,6 +18,7 @@ import 'package:finamp/services/jellyfin_api_helper.dart';
 import 'package:finamp/services/music_player_background_task.dart';
 import 'package:finamp/services/queue_service.dart';
 import 'package:finamp/services/radio_tuning.dart';
+import 'package:finamp/services/radio_clock_settings.dart';
 import 'package:finamp/services/genre_mix.dart';
 import 'package:finamp/services/radio_queue.dart';
 import 'package:finamp/services/radio_preferences.dart';
@@ -107,6 +108,7 @@ Future<void> maybeAddRadioTracks() async {
         final queue = queueService.getQueue();
         final allowRepeats = RadioQueue.allowsArtistRepeats(state.radioMode, queue.source);
         publish(state.copyWith(generating: true, queueing: false, failed: false));
+        // Already tuned (skips, key and tempo, time of day) when it was generated.
         var pool = await preferences.rank(state.tracks, needed, album: state.radioMode == RadioMode.albumMix);
         if (!current()) return true;
         RadioSelection select() => RadioQueue.select(
@@ -502,15 +504,23 @@ Future<List<BaseItemDto>> generateRadioTracks(
 
   Future<List<BaseItemDto>> reshuffleMode() async {
     final tracks = withoutDuplicateSongs(await collectionTracks());
-    return ShuffleRandomness.order(tracks, FinampSettingsHelper.finampSettings.shuffleRandomness);
+    // Matching the time of day leans the order by the hour (and by key and tempo, as all tuned Radio does);
+    // otherwise the collection is reshuffled as it always was.
+    if (tracks.isEmpty || !await RadioClockSettings.load()) {
+      return ShuffleRandomness.order(tracks, FinampSettingsHelper.finampSettings.shuffleRandomness);
+    }
+    return RadioTuning.order(actualSeed ?? tracks.first, tracks);
   }
 
   Future<List<BaseItemDto>> randomMode() async {
     final tracks = withoutDuplicateSongs(await collectionTracks());
-    return ShuffleRandomness.order(
-      ShuffleRandomness.libraryOrder(tracks),
-      FinampSettingsHelper.finampSettings.shuffleRandomness,
-    );
+    if (tracks.isEmpty || !await RadioClockSettings.load()) {
+      return ShuffleRandomness.order(
+        ShuffleRandomness.libraryOrder(tracks),
+        FinampSettingsHelper.finampSettings.shuffleRandomness,
+      );
+    }
+    return RadioTuning.order(actualSeed ?? tracks.first, ShuffleRandomness.libraryOrder(tracks));
   }
 
   /// Adds tracks which are similar to the queue source, with a slightly randomized order

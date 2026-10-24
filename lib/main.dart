@@ -75,6 +75,7 @@ import 'package:finamp/screens/crossfade_settings_screen.dart';
 import 'package:finamp/screens/dj_voice_settings_screen.dart';
 import 'package:finamp/screens/scrobbling_settings_screen.dart';
 import 'package:finamp/screens/on_this_day_screen.dart';
+import 'package:finamp/screens/mix_map_screen.dart';
 import 'package:finamp/screens/smart_playlists_screen.dart';
 import 'package:finamp/screens/quiz_screen.dart';
 import 'package:finamp/screens/visualizer_screen.dart';
@@ -1136,6 +1137,7 @@ class FinampApp extends ConsumerWidget {
         CrossfadeSettingsScreen.routeName: (context) => const CrossfadeSettingsScreen(),
         DjVoiceSettingsScreen.routeName: (context) => const DjVoiceSettingsScreen(),
         OnThisDayScreen.routeName: (context) => const OnThisDayScreen(),
+        MixMapScreen.routeName: (context) => const MixMapScreen(),
         SmartPlaylistsScreen.routeName: (context) => const SmartPlaylistsScreen(),
         QuizScreen.routeName: (context) => const QuizScreen(),
         VisualizerScreen.routeName: (context) => const VisualizerScreen(),

@@ -7,10 +7,14 @@ import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 
 /// A menu's own harmonic mixing switch, remembered on this device. Needs the analyzer, which knows each song's key
 /// and tempo, so it's off and disabled until that's set up. While it's on, the harmonic strength shows under it.
+/// [onChanged] is told whether harmonic mixing is in effect once loaded and on every change. Without [showStrength]
+/// the menu shows the strength itself.
 class HarmonicMixingSwitch extends StatefulWidget {
-  const HarmonicMixingSwitch({super.key, required this.menu});
+  const HarmonicMixingSwitch({super.key, required this.menu, this.onChanged, this.showStrength = true});
 
   final HarmonicMixingMenu menu;
+  final ValueChanged<bool>? onChanged;
+  final bool showStrength;
 
   @override
   State<HarmonicMixingSwitch> createState() => _HarmonicMixingSwitchState();
@@ -32,6 +36,7 @@ class _HarmonicMixingSwitchState extends State<HarmonicMixingSwitch> {
           _analyzer = analyzer;
           _enabled = enabled;
         });
+        widget.onChanged?.call(analyzer && enabled);
       }
     }();
   }
@@ -43,7 +48,7 @@ class _HarmonicMixingSwitchState extends State<HarmonicMixingSwitch> {
       mainAxisSize: MainAxisSize.min,
       children: [
         _switch(context),
-        if (on) const HarmonicStrengthSlider(padding: EdgeInsets.only(bottom: 8)),
+        if (on && widget.showStrength) const HarmonicStrengthSlider(padding: EdgeInsets.only(bottom: 8)),
       ],
     );
   }
@@ -58,6 +63,7 @@ class _HarmonicMixingSwitchState extends State<HarmonicMixingSwitch> {
           ? null
           : (enabled) {
               setState(() => _enabled = enabled);
+              widget.onChanged?.call(enabled);
               HarmonicMixing.setMenuEnabled(widget.menu, enabled).ignore();
             },
     );

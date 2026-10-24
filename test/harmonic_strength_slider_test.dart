@@ -45,4 +45,27 @@ void main() {
     await tester.pump();
     expect(find.text('30%'), findsNWidgets(2));
   });
+
+  testWidgets('a menu switch says whether harmonic mixing is in effect, so Smart Shuffle can dim Randomness', (
+    tester,
+  ) async {
+    await SharedPreferencesAsync().setString('analyzerUrl', 'http://analyzer.test');
+    final reported = <bool>[];
+    await tester.pumpWidget(app(HarmonicMixingSwitch(menu: HarmonicMixingMenu.smartShuffle, onChanged: reported.add)));
+    await tester.pumpAndSettle();
+    expect(reported, [false]);
+
+    await tester.tap(find.byType(Switch));
+    await tester.pumpAndSettle();
+    expect(reported, [false, true]);
+    expect(find.text('Harmonic strength'), findsOneWidget);
+  });
+
+  testWidgets('without the analyzer the switch says harmonic mixing is off', (tester) async {
+    await SharedPreferencesAsync().setBool('harmonicMixing_smartShuffle', true);
+    final reported = <bool>[];
+    await tester.pumpWidget(app(HarmonicMixingSwitch(menu: HarmonicMixingMenu.smartShuffle, onChanged: reported.add)));
+    await tester.pumpAndSettle();
+    expect(reported, [false]);
+  });
 }

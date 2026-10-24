@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'package:finamp/menus/play_order_menu.dart';
 import 'package:finamp/menus/components/menuEntries/genre_answers_menu_entry.dart';
+import 'package:finamp/menus/components/menuEntries/good_match_next_menu_entry.dart';
+import 'package:finamp/menus/components/menuEntries/mix_map_menu_entry.dart';
 import 'package:finamp/menus/components/menuEntries/listening_choices_menu_entry.dart';
 import 'package:finamp/menus/components/menuEntries/prepare_karaoke_menu_entry.dart';
 
@@ -256,6 +258,8 @@ class _TrackMenuState extends ConsumerState<TrackMenu> with TickerProviderStateM
       ),
       InstantMixMenuEntry(baseItem: widget.item),
       MoreLikeThisMenuEntry(baseItem: widget.item),
+      // Only for the song playing, since the match plays right after it.
+      if (queueItem != null) GoodMatchNextMenuEntry(baseItem: widget.item),
       PrepareKaraokeMenuEntry(item: widget.item),
       StartRadioMenuEntry(baseItem: widget.item),
       AdaptiveDownloadLockDeleteMenuEntry(baseItem: widget.item),
@@ -265,6 +269,7 @@ class _TrackMenuState extends ConsumerState<TrackMenu> with TickerProviderStateM
       DoesntFitGenreMenuEntry(item: widget.item, queueItem: widget.queueItem ?? queueItem),
       ListeningChoicesMenuEntry(item: widget.item),
       GenreAnswersMenuEntry(item: widget.item),
+      if (widget.showQueueActions) const MixMapMenuEntry(),
       if (widget.showQueueActions) CreatePlaylistFromCurrentQueueMenuEntry(),
       if (widget.showQueueActions) ClearQueueMenuEntry(baseItem: widget.item),
       DeleteFromServerMenuEntry(baseItem: widget.item),

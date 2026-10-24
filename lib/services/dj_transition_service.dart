@@ -26,6 +26,9 @@ enum EnergyShape {
   /// Intense to calm: winding down, bedtime.
   windDown,
 
+  /// Rising and falling twice: a long session with breathers. Only chosen by hand, not by the Ai DJ.
+  wave,
+
   /// No particular shape.
   free,
 }
@@ -265,6 +268,12 @@ class DjTransitionService {
   /// Uses the track artist rather than the album artist, so compilations aren't one "Various Artists" block.
   static List<BaseItemDto> spreadArtists(List<BaseItemDto> tracks) => spreadOut(tracks, artistKey);
 
+  /// [spreadArtists] for a mix whose first song may change too: a majority artist can lead when it has to. Keeping
+  /// the first song can leave the same artist twice at the end, which the queue then drops, so the mix comes up
+  /// short. Not for mixes that must start with a chosen song (a seed).
+  static List<BaseItemDto> spreadArtistsFreely(List<BaseItemDto> tracks) =>
+      ArtistSpacing.order(tracks, artistKey, keepFirst: false);
+
   /// The track's main artist for comparing, or null if it has none.
   static String? artistKey(BaseItemDto track) => ArtistSpacing.artistKey(track);
 
@@ -301,6 +310,8 @@ class DjTransitionService {
         EnergyShape.windDown => 1 - t,
         // Up to a peak about two thirds of the way in, then easing off, though not all the way down.
         EnergyShape.peak => t <= 0.68 ? t / 0.68 : 1 - (t - 0.68) / 0.32 * 0.55,
+        // Two rises, each easing back down: calm, high, calm, high, calm.
+        EnergyShape.wave => 0.5 - 0.5 * cos(t * 4 * pi),
         EnergyShape.steady || EnergyShape.free => 0.5,
       };
     }

@@ -16,12 +16,16 @@ class CrossfadeSettingsScreen extends StatefulWidget {
 
 class _CrossfadeSettingsScreenState extends State<CrossfadeSettingsScreen> {
   CrossfadeSettings? _settings;
+  bool _tempoMatching = false;
 
   @override
   void initState() {
     super.initState();
     CrossfadeService.loadSettings().then((settings) {
       if (mounted) setState(() => _settings = settings);
+    });
+    CrossfadeService.loadTempoMatching().then((enabled) {
+      if (mounted) setState(() => _tempoMatching = enabled);
     });
   }
 
@@ -64,6 +68,18 @@ class _CrossfadeSettingsScreenState extends State<CrossfadeSettingsScreen> {
                       : (keep) => _save((seconds: settings.seconds, keepAlbumsGapless: keep)),
                 ),
                 const SizedBox(height: 16),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(context.l10n.tempoMatchedTransitions),
+                  subtitle: Text(context.l10n.tempoMatchedTransitionsHelp),
+                  value: _tempoMatching,
+                  onChanged: settings.seconds == 0 || !CrossfadeService.tempoMatchingSupported
+                      ? null
+                      : (value) async {
+                          setState(() => _tempoMatching = value);
+                          await CrossfadeService.saveTempoMatching(value);
+                        },
+                ),
                 OutlinedButton.icon(
                   onPressed: settings.seconds == 0
                       ? null

@@ -11,6 +11,8 @@ import 'package:collection/collection.dart';
 import 'package:finamp/components/global_snackbar.dart';
 import 'package:finamp/l10n/app_localizations.dart';
 import 'package:finamp/services/finamp_user_helper.dart';
+import 'package:finamp/services/listening_hour.dart';
+import 'package:finamp/services/radio_clock_settings.dart';
 import 'package:finamp/services/queue_service.dart';
 import 'package:finamp/services/radio_service_helper.dart';
 import 'package:finamp/utils/platform_helper.dart';
@@ -3867,7 +3869,12 @@ class RadioCacheState {
     this.queueing = false,
     this.failed = false,
     AlbumMixFallbackModes? albumMixFallbackMode,
-  }) : _albumMixFallbackMode = albumMixFallbackMode;
+    ListeningHour? hourBand,
+  }) : _albumMixFallbackMode = albumMixFallbackMode,
+       hourBand = hourBand ?? listeningHour(DateTime.now().hour);
+
+  /// The part of the day the tracks were chosen for, when Radio matches the time of day.
+  final ListeningHour hourBand;
 
   List<BaseItemDto> tracks;
   final RadioMode radioMode;
@@ -3900,6 +3907,7 @@ class RadioCacheState {
       queueing: queueing ?? this.queueing,
       failed: failed ?? this.failed,
       albumMixFallbackMode: _albumMixFallbackMode,
+      hourBand: hourBand,
     );
   }
 
@@ -3920,7 +3928,13 @@ class RadioCacheState {
         currentRadioMode == radioMode &&
         (queueing || queueId == null || queue.id == queueId) &&
         // Ignore incorrect seeds while the queue is actively being manipulated by the radio
-        (currentSeedItem?.id == seedItem?.id || queueing);
+        (currentSeedItem?.id == seedItem?.id || queueing) &&
+        // Chosen for another part of the day: chosen again, for this one. A Reshuffle cycle plays out first, as
+        // choosing again would bring back songs it has already played.
+        (queueing ||
+            radioMode == RadioMode.reshuffle ||
+            !RadioClockSettings.cached ||
+            hourBand == listeningHour(DateTime.now().hour));
   }
 }
 

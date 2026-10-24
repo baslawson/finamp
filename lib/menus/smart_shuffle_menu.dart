@@ -2,10 +2,10 @@ import 'dart:math';
 
 import 'package:collection/collection.dart';
 import 'package:finamp/components/fun_heading.dart';
-import 'package:finamp/components/AudioServiceSettingsScreen/shuffle_randomness_slider.dart';
 import 'package:finamp/components/genre_fit_switch.dart';
 import 'package:finamp/components/global_snackbar.dart';
 import 'package:finamp/components/harmonic_mixing_switch.dart';
+import 'package:finamp/components/mix_feel.dart';
 import 'package:finamp/components/mix_length_chips.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/models/finamp_models.dart';
@@ -69,6 +69,29 @@ String _id(BaseItemDto track) => track.id.raw;
 /// The chosen length in minutes, 0 for any length.
 const _lengthKey = "smartShuffleMinutes";
 
+/// The chosen energy shape's name.
+const _shapeKey = "smartShuffleShape";
+
+/// The energy shapes offered, in the order shown.
+const _shapes = [
+  EnergyShape.free,
+  EnergyShape.build,
+  EnergyShape.peak,
+  EnergyShape.steady,
+  EnergyShape.wave,
+  EnergyShape.windDown,
+];
+
+/// What [shape] is called in a menu.
+String energyShapeLabel(BuildContext context, EnergyShape shape) => switch (shape) {
+  EnergyShape.free => context.l10n.energyShapeAny,
+  EnergyShape.build => context.l10n.energyShapeBuild,
+  EnergyShape.peak => context.l10n.energyShapePeak,
+  EnergyShape.steady => context.l10n.energyShapeSteady,
+  EnergyShape.wave => context.l10n.energyShapeWave,
+  EnergyShape.windDown => context.l10n.energyShapeWindDown,
+};
+
 class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
   int? _decade;
   _GenreChoice? _genre;
@@ -78,12 +101,33 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
   bool _starting = false;
   bool _tidying = false;
 
+  /// Whether harmonic mixing orders this mix, by Harmonic strength, so Randomness only matters if it falls back.
+  bool _harmonic = false;
+
+  /// The energy shape the mix runs along; free for none. Needs the analyzer, which measures each song's energy.
+  EnergyShape _shape = EnergyShape.free;
+  bool _analyzer = false;
+
   @override
   void initState() {
     super.initState();
+    () async {
+      final analyzer = await AnalyzerService.isConfigured();
+      final name = await SharedPreferencesAsync().getString(_shapeKey);
+      if (!mounted) return;
+      setState(() {
+        _analyzer = analyzer;
+        _shape = _shapes.firstWhereOrNull((shape) => shape.name == name) ?? EnergyShape.free;
+      });
+    }();
     SharedPreferencesAsync().getInt(_lengthKey).then((minutes) {
       if (minutes != null && minutes > 0 && mounted) setState(() => _minutes = minutes);
     });
+  }
+
+  void _setShape(EnergyShape shape) {
+    setState(() => _shape = shape);
+    SharedPreferencesAsync().setString(_shapeKey, shape.name).ignore();
   }
 
   void _setMinutes(int? minutes) {
@@ -104,12 +148,11 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
         GlobalSnackbar.message((context) => context.l10n.smartShuffleNoTracks);
         return;
       }
-      // Ordered from the whole pool so each song has the most to choose a good next song from, then cut to length.
-      final harmonic = await HarmonicMixing.menuEnabled(HarmonicMixingMenu.smartShuffle)
-          ? await DjTransitionService.harmonicShuffle(tracks, strength: HarmonicMixing.strength.value)
-          : null;
+      final harmonicOn = await HarmonicMixing.menuEnabled(HarmonicMixingMenu.smartShuffle);
+      final shape = _analyzer ? _shape : EnergyShape.free;
       if (!mounted) return;
       final name = [
+        if (shape != EnergyShape.free) energyShapeLabel(context, shape),
         if (_decade != null) context.l10n.smartShuffleDecadeLabel(_decade.toString()),
         if (_genre != null) _genre!.name,
         if (_minutes != null) mixLengthLabel(context, _minutes!),
@@ -124,18 +167,31 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
         ),
         id: GenreMix.smartShuffleId,
       );
+      // Along the energy shape when one is chosen and enough songs are measured; otherwise ordered from the whole
+      // pool so each song has the most to choose a good next song from, then cut to length.
+      final shaped = shape == EnergyShape.free ? null : await _shaped(tracks, source, shape, harmonic: harmonicOn);
+      if (shape != EnergyShape.free && shaped == null) {
+        GlobalSnackbar.message((context) => context.l10n.smartShuffleShapeNotEnoughAnalysis);
+      }
+      final harmonic = shaped == null && harmonicOn
+          ? await DjTransitionService.harmonicShuffle(tracks, strength: HarmonicMixing.strength.value)
+          : null;
+      if (!mounted) return;
+      // A shaped or harmonic order plays as it is: from its first song, without the queue shuffling it again.
+      final ordered = shaped != null || harmonic != null;
       // Remembered first, so the song menu can offer "Doesn't fit" as soon as the mix plays.
       if (_genre != null) {
         await GenreMix.started(sourceName: source.name.pretranslatedName!, genre: _genre!.name);
       }
       await GetIt.instance<QueueService>().startPlayback(
-        items: prepareSmartShuffle(harmonic ?? tracks, source, minutes: _minutes, harmonic: harmonic != null),
+        items: shaped ?? prepareSmartShuffle(harmonic ?? tracks, source, minutes: _minutes, harmonic: harmonic != null),
         source: source,
-        // A harmonic order plays as it is: from its first song, without the queue shuffling it again.
-        order: harmonic == null ? FinampPlaybackOrder.shuffled : FinampPlaybackOrder.linear,
-        startingIndex: harmonic == null ? null : 0,
-        randomizeGenerated: harmonic == null,
-        harmonicOrder: harmonic != null,
+        order: ordered ? FinampPlaybackOrder.linear : FinampPlaybackOrder.shuffled,
+        startingIndex: ordered ? 0 : null,
+        randomizeGenerated: !ordered,
+        harmonicOrder: harmonic != null || (shaped != null && harmonicOn),
+        // A shaped mix keeps its energy shape when the harmonic strength changes.
+        keepsShape: shaped != null,
       );
       if (mounted) Navigator.of(context).pop();
     } catch (e) {
@@ -143,6 +199,31 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
     } finally {
       if (mounted) setState(() => _starting = false);
     }
+  }
+
+  /// [tracks] along the energy [shape], smoothed in key and tempo with [harmonic] mixing. Null when too few are
+  /// measured.
+  Future<List<BaseItemDto>?> _shaped(
+    List<BaseItemDto> tracks,
+    QueueItemSource source,
+    EnergyShape shape, {
+    required bool harmonic,
+  }) async {
+    final ids = [for (final track in tracks) track.id.raw];
+    final analysis = await AnalyzerService.cachedAnalysis(ids).timeout(
+      DjTransitionService.harmonicAnalysisWait,
+      onTimeout: () => {for (final id in ids) id: ?AnalyzerService.cached(id)},
+    );
+    final cost = DjTransitionService.cachedTransitionCost();
+    return shapeSmartShuffle(
+      tracks,
+      source,
+      shape: shape,
+      intensity: (track) => analysis[track.id.raw]?.intensity,
+      minutes: _minutes,
+      cost: harmonic ? (from, to) => cost(analysis[from.id.raw], analysis[to.id.raw]) : null,
+      strength: HarmonicMixing.strength.value,
+    );
   }
 
   Future<void> _tidyGenres() async {
@@ -280,13 +361,35 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
                   spacing: 8.0,
                   children: [
                     GradientTitle(context.l10n.smartShuffleAction, icon: TablerIcons.arrows_shuffle),
-                    const ShuffleRandomnessSlider(padding: EdgeInsets.symmetric(vertical: 8)),
-                    const HarmonicMixingSwitch(menu: HarmonicMixingMenu.smartShuffle),
+                    HarmonicMixingSwitch(
+                      menu: HarmonicMixingMenu.smartShuffle,
+                      onChanged: (on) => setState(() => _harmonic = on),
+                      // Shown in the mix feel below instead, with Randomness.
+                      showStrength: false,
+                    ),
+                    // Randomness and Harmonic strength together; the one not ordering this mix is faded but still
+                    // usable, as Randomness applies if too few songs are analysed.
+                    MixFeel(harmonic: _harmonic),
                     Text(context.l10n.smartShuffleLength, style: textTheme.titleSmall),
                     MixLengthChips(
                       minutes: _minutes,
                       onChanged: _setMinutes,
                       anyLabel: context.l10n.smartShuffleAnyLength,
+                    ),
+                    const SizedBox(height: 4.0),
+                    Text(context.l10n.smartShuffleEnergy, style: textTheme.titleSmall),
+                    if (!_analyzer) Text(context.l10n.harmonicMixingNeedsAnalyzer, style: textTheme.bodySmall),
+                    Wrap(
+                      spacing: 8.0,
+                      runSpacing: 4.0,
+                      children: [
+                        for (final shape in _shapes)
+                          ChoiceChip(
+                            label: Text(energyShapeLabel(context, shape)),
+                            selected: _analyzer ? _shape == shape : shape == EnergyShape.free,
+                            onSelected: _analyzer ? (_) => _setShape(shape) : null,
+                          ),
+                      ],
                     ),
                     const SizedBox(height: 4.0),
                     Text(context.l10n.smartShuffleDecade, style: textTheme.titleSmall),

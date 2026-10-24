@@ -12,6 +12,7 @@ import 'package:finamp/services/finamp_settings_helper.dart';
 import 'package:finamp/services/jellyfin_api_helper.dart';
 import 'package:finamp/services/queue_service.dart';
 import 'package:finamp/services/radio_preferences.dart';
+import 'package:finamp/services/radio_clock_settings.dart';
 import 'package:finamp/services/listenbrainz_discovery_service.dart';
 import 'package:finamp/services/radio_service_helper.dart' as radio;
 import 'package:flutter/material.dart';
@@ -29,6 +30,7 @@ class _RadioControlsScreenState extends State<RadioControlsScreen> {
   List<RadioStation> _stations = [];
   List<String> _genres = [];
   bool _loading = true, _busy = false, _analyzer = false;
+  bool _matchTime = true;
   String? _error;
   StreamSubscription<FinampQueueInfo?>? _queueSubscription;
   QueueService get _queue => GetIt.instance<QueueService>();
@@ -50,6 +52,7 @@ class _RadioControlsScreenState extends State<RadioControlsScreen> {
   Future<void> _load() async {
     try {
       final preferences = await RadioPreferencesStore.load(), stations = await RadioPreferencesStore.stations();
+      final matchTime = await RadioClockSettings.load();
       final analyzer = await AnalyzerService.isConfigured();
       List<BaseItemDto> genres = [];
       if (!FinampSettingsHelper.finampSettings.isOffline) {
@@ -71,6 +74,7 @@ class _RadioControlsScreenState extends State<RadioControlsScreen> {
       if (mounted) {
         setState(() {
           _preferences = preferences;
+          _matchTime = matchTime;
           _stations = stations;
           _analyzer = analyzer;
           _genres = {...preferences.genres, ...genres.map((g) => g.name).whereType<String>()}.toList()..sort();
@@ -101,6 +105,7 @@ class _RadioControlsScreenState extends State<RadioControlsScreen> {
   Future<void> _apply({BaseItemDto? seed}) => _run(() async {
     final wasEnabled = FinampSettingsHelper.finampSettings.radioEnabled;
     await RadioPreferencesStore.save(_preferences);
+    await RadioClockSettings.save(_matchTime);
     if (seed != null) FinampSetters.setRadioMode(RadioMode.similar);
     if (FinampSettingsHelper.finampSettings.radioEnabled || seed != null) {
       radio.toggleRadio(true);
@@ -369,6 +374,19 @@ class _RadioControlsScreenState extends State<RadioControlsScreen> {
                       ],
                     ),
                   ),
+                const Divider(),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(context.l10n.radioMatchTimeOfDay),
+                  subtitle: Text(context.l10n.radioMatchTimeOfDayHelp),
+                  value: _matchTime,
+                  onChanged: _busy || !songMode
+                      ? null
+                      : (value) async {
+                          setState(() => _matchTime = value);
+                          await _apply();
+                        },
+                ),
               ],
             ),
     );

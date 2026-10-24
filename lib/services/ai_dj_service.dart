@@ -175,7 +175,7 @@ ${lines.join("\n")}''';
       // tempos flow; otherwise in the AI's order. An explicit artist request may repeat that artist; other mixes need
       // spacing.
       items: shaped != null
-          ? (artistsRequested ? shaped : DjTransitionService.spreadArtists(shaped))
+          ? (artistsRequested ? shaped : DjTransitionService.spreadArtistsFreely(shaped))
           : harmonic || await DjTransitionService.isEnabled()
           ? await DjTransitionService.smoothOrder(
               detailed,
@@ -185,7 +185,7 @@ ${lines.join("\n")}''';
             )
           : artistsRequested
           ? detailed
-          : DjTransitionService.spreadArtists(detailed),
+          : DjTransitionService.spreadArtistsFreely(detailed),
       source: QueueItemSource.rawId(
         type: QueueItemSourceType.unknown,
         name: QueueItemSourceName(type: QueueItemSourceNameType.preTranslated, pretranslatedName: "Ai DJ: $mixName"),

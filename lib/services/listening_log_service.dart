@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:isolate';
 
+import 'package:finamp/services/artist_spacing.dart';
 import 'package:finamp/models/finamp_models.dart';
 import 'package:finamp/services/scrobble_service.dart';
 import 'package:finamp/services/listening_preferences.dart';
@@ -92,6 +93,8 @@ class ListeningLogService {
           trackId: base.id.raw,
           name: base.name ?? "",
           artist: base.albumArtist ?? base.artists?.firstOrNull,
+          // Compilations show their album artist, but Radio tells artists apart by the track artist.
+          artistKey: ArtistSpacing.artistKey(base),
         ),
       );
     }

@@ -21,6 +21,7 @@ import 'package:finamp/services/current_album_image_provider.dart';
 import 'package:finamp/services/artist_spacing.dart';
 import 'package:finamp/services/dj_transition_service.dart';
 import 'package:finamp/services/downloads_service.dart';
+import 'package:finamp/services/crossfade_service.dart';
 import 'package:finamp/services/finamp_settings_helper.dart';
 import 'package:finamp/services/finamp_user_helper.dart';
 import 'package:finamp/services/jellyfin_api_helper.dart';
@@ -1568,8 +1569,10 @@ class QueueService {
   set playbackSpeed(double speed) {
     _playbackSpeed = speed;
     _playbackSpeedStream.add(speed);
-    _audioHandler.setSpeed(speed);
+    // Saved first: a tempo-matched fade that's interrupted restores the saved speed, not 1x.
     FinampSetters.setPlaybackSpeed(playbackSpeed);
+    unawaited(CrossfadeService.interruptTempoMatching());
+    _audioHandler.setSpeed(speed);
     _queueServiceLogger.fine("Playback speed set to ${FinampSettingsHelper.finampSettings.playbackSpeed}");
     if (FinampSettingsHelper.finampSettings.syncPlaybackSpeedAndPitch) {
       playbackPitch = speed;
@@ -1581,6 +1584,8 @@ class QueueService {
   set playbackPitch(double pitch) {
     _playbackPitch = pitch;
     _playbackPitchStream.add(pitch);
+    // A tempo-matched fade's second player can't follow a new pitch, so it ends.
+    unawaited(CrossfadeService.interruptTempoMatching());
     _audioHandler.setPitch(pitch);
     FinampSetters.setPlaybackPitch(playbackPitch);
     _queueServiceLogger.fine("Playback pitch set to ${FinampSettingsHelper.finampSettings.playbackPitch}");

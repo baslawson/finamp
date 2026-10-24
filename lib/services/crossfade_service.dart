@@ -1,12 +1,15 @@
 import 'dart:async';
 import 'package:finamp/services/listening_preferences.dart';
+import 'package:finamp/services/tempo_matching.dart';
 import 'dart:io';
 import 'dart:math';
 
 import 'package:audio_service/audio_service.dart';
 import 'package:finamp/models/finamp_models.dart';
 import 'package:finamp/services/analyzer_service.dart';
+import 'package:finamp/services/dj_voice_service.dart';
 import 'package:finamp/services/music_player_background_task.dart';
+import 'package:finamp/services/night_mode_service.dart';
 import 'package:finamp/services/queue_service.dart';
 import 'package:finamp/services/radio_tuning.dart';
 import 'package:finamp/services/playback_buffer_policy.dart';
@@ -25,19 +28,64 @@ typedef CrossfadeSettings = ({int seconds, bool keepAlbumsGapless});
 
 /// Overlaps the end of each song with the start of the next. The next song starts early on a second player.
 ///
-/// On Android the second player's sound is mixed into the main player's own output (see CrossfadeBridge in the
+/// On Android ordinary fades mix the second player's sound into the main player's own output (see CrossfadeBridge in the
 /// vendored just_audio), so everything comes out of one output; when the main player reaches the next song it continues
 /// at exactly the next sample. If that mix cannot be scheduled safely, Android plays the transition normally.
-/// Other platforms use two outputs and line them up at the hand-over.
+/// Tempo matching and other platforms use two outputs and line them up at the hand-over.
 class CrossfadeService {
   CrossfadeService._();
 
   static final _logger = Logger("CrossfadeService");
   static const _secondsKey = "crossfadeSeconds";
   static const _albumsKey = "crossfadeKeepAlbumsGapless";
+  static const _tempoKey = 'crossfadeTempoMatching';
   static const maxSeconds = 12;
 
   static CrossfadeSettings _settings = (seconds: 0, keepAlbumsGapless: true);
+  static bool _tempoEnabled = false;
+  static TempoMatch? _tempoMatch;
+  static bool _tempoHandover = false;
+  static double? _catchUpBaseSpeed;
+  static int _generation = 0;
+  static final _handoverSeekKey = Object();
+
+  /// Only the crossfade's own seek may keep the covering player running.
+  static bool get isHandoverSeek => Zone.current[_handoverSeekKey] == true;
+
+  static Future<void> _seekForHandover(MusicPlayerBackgroundTask player, Duration position) =>
+      runZoned(() => player.seek(position, userInitiated: false), zoneValues: {_handoverSeekKey: true});
+
+  // The Android PCM mixer runs before Media3's speed processor. Independent
+  // speeds therefore need two outputs. Darwin explicitly uses AVAudioTimePitchAlgorithmTimeDomain.
+  static bool get tempoMatchingSupported => Platform.isAndroid || Platform.isIOS || Platform.isMacOS;
+
+  static Future<bool> loadTempoMatching() async => await SharedPreferencesAsync().getBool(_tempoKey) ?? false;
+
+  /// From the next transition on: one already playing keeps its plan, as stopping it would restart the next song.
+  static Future<void> saveTempoMatching(bool enabled) async {
+    _tempoEnabled = enabled;
+    await SharedPreferencesAsync().setBool(_tempoKey, enabled);
+  }
+
+  /// Navigation, pausing or a new playback speed must stop a tempo ramp before moving either player. Only while a
+  /// ramp is planned or handing over: an ordinary crossfade, or one still being prepared, carries on.
+  static Future<void> interruptTempoMatching() async {
+    // A second command during the cancellation waits for it too, so it can't run first and be undone by the older one.
+    if (_tempoCancelling case final pending?) return pending;
+    if (_tempoMatch != null || _tempoHandover) {
+      _skipForCurrentId = _currentId;
+      final pending = _tempoCancelling = _cancel();
+      try {
+        await pending;
+      } finally {
+        if (identical(_tempoCancelling, pending)) _tempoCancelling = null;
+      }
+    }
+  }
+
+  /// The cancellation of a tempo-matched fade that a transport command started, while it runs.
+  static Future<void>? _tempoCancelling;
+
   static bool get active => _settings.seconds > 0;
 
   @visibleForTesting
@@ -159,6 +207,7 @@ class CrossfadeService {
 
   static Future<void> initialize() async {
     _settings = await loadSettings();
+    _tempoEnabled = await loadTempoMatching();
     await HarmonicMixing.load();
     // Retire the old manual offset once; both paths now handle their own timing.
     final prefs = SharedPreferencesAsync();
@@ -174,6 +223,10 @@ class CrossfadeService {
     _playingSubscription = player.playbackState.map((state) => state.playing).distinct().listen((playing) {
       _timer?.cancel();
       _timer = playing ? Timer.periodic(const Duration(milliseconds: 100), (_) => unawaited(_tick())) : null;
+      if (!playing && (_tempoMatch != null || _tempoHandover)) {
+        unawaited(interruptTempoMatching());
+        return;
+      }
       // Pausing mid-fade pauses both songs.
       if (_fading || _priming) unawaited(playing ? _nextPlayer?.play() : _nextPlayer?.pause());
     });
@@ -301,10 +354,24 @@ class CrossfadeService {
     if (nextPlayer == null) return;
     if (!_nativeTried && window.start - position <= const Duration(seconds: 2)) {
       _nativeTried = true;
+      _tempoMatch = _tempoFor(duration, current.baseItemId.raw, incoming?.baseItemId.raw);
+      if (_tempoMatch case final match?) {
+        // Update more often while the independent players meet and change tempo.
+        _timer?.cancel();
+        _timer = Timer.periodic(const Duration(milliseconds: 20), (_) => unawaited(_tick()));
+        // The opening was buffered at normal speed when the song was loaded, and a new speed only reaches audio decoded
+        // after it. Seeking the still paused player to where it is flushes that, so the song starts at the matched
+        // tempo from its first sample, as the beat timing assumes.
+        await nextPlayer.setSpeed(match.initialSpeed);
+        if (_nextPlayer != nextPlayer) return;
+        await nextPlayer.seek(nextPlayer.position);
+        if (_nextPlayer != nextPlayer) return;
+      }
       final currentGain = player.normalizationFactorFor(current.item);
       _gainRatio = currentGain > 0 ? _nextGain / currentGain : 1.0;
       _mixed =
-          Platform.isAndroid &&
+          _tempoMatch == null &&
+              Platform.isAndroid &&
               player.speed == 1.0 &&
               canCoverNativeTail(untilBoundary: duration - window.start, incomingDuration: nextPlayer.duration)
           ? null
@@ -315,11 +382,14 @@ class CrossfadeService {
         await nextPlayer.setVolume(0);
         unawaited(nextPlayer.play());
       } else {
-        if (Platform.isAndroid) return _skipCrossfade('native mixing is unavailable for this transition');
+        if (Platform.isAndroid && _tempoMatch == null) {
+          return _skipCrossfade('native mixing is unavailable for this transition');
+        }
         await _bridge<void>('disarm');
-        _logger.info('Crossfade with two outputs (native mixing unavailable on this platform)');
+        _logger.info('Crossfade with two outputs${_tempoMatch == null ? '' : ' (tempo matched)'}');
       }
     }
+    if (_nextPlayer != nextPlayer) return;
     if (_priming && _mixed == null) {
       final result = await _bridge<int>('scheduleMix', {
         'startUs': window.start.inMicroseconds,
@@ -346,6 +416,9 @@ class CrossfadeService {
       _fading = true;
       // Silent on its own in either case until the mode is known; mixed, it stays silent and is heard via the main one.
       await nextPlayer.setVolume(0);
+      if (_nextPlayer != nextPlayer) return;
+      if (_tempoMatch case final match?) await nextPlayer.setSpeed(match.initialSpeed);
+      if (_nextPlayer != nextPlayer) return;
       unawaited(nextPlayer.play());
       _logger.info(
         "Crossfading into $_nextId from ${window.start.inMilliseconds} to ${window.end.inMilliseconds} ms "
@@ -353,6 +426,12 @@ class CrossfadeService {
       );
     }
     if (_fading) {
+      if (_nextPlayer != nextPlayer) return;
+      if (_tempoMatch case final match?) {
+        final speed = match.speedAt(nextPlayer.position.inMicroseconds / 1000000);
+        if ((nextPlayer.speed - speed).abs() > 1e-5) await nextPlayer.setSpeed(speed);
+        if (_nextPlayer != nextPlayer) return;
+      }
       final progress = (position - window.start).inMilliseconds / max(1, (window.end - window.start).inMilliseconds);
       final volumes = curve(progress);
       final mixed = _mixed ?? false;
@@ -363,6 +442,7 @@ class CrossfadeService {
       }
       if (_mixed == false) {
         await player.setTransitionVolume(volumes.out);
+        if (_nextPlayer != nextPlayer) return;
         await nextPlayer.setVolume(volumes.into * player.crossfadeBaseVolume * _nextGain);
       }
       // Keep the native mix running across a silent tail. Seeking here flushes its
@@ -373,9 +453,16 @@ class CrossfadeService {
         _logger.info("Skipping ${(duration - position).inSeconds} s of silence at the end of the song");
         // Make the covering player audible before muting or seeking the main one.
         await nextPlayer.setVolume(player.crossfadeBaseVolume * _nextGain);
+        // Cancelled meanwhile (a pause, seek or skip): the main player is the listener's again, so it's left alone.
+        if (_nextPlayer != nextPlayer) return;
         await player.setTransitionVolume(0);
+        if (_nextPlayer != nextPlayer) {
+          // The cancellation's own clean-up has run, so the mute is undone here.
+          await player.setTransitionVolume(1.0);
+          return;
+        }
         // To the very end, as if it had played out: it counts as played, not skipped.
-        await player.seek(duration, userInitiated: false);
+        await _seekForHandover(player, duration);
       }
     }
   }
@@ -402,6 +489,64 @@ class CrossfadeService {
   static String? _currentTrack;
   static String? _nextTrack;
 
+  /// On Android the second output skips everything done to the main player's own sound: the equaliser (headphone
+  /// correction, tone controls), night mode's compressor, and the DJ's ducking envelope. So tempo matching, which
+  /// needs that output, is only used while none of them is in play; otherwise the song would change tone or level at
+  /// the hand-over, or jump in level under the DJ, and an ordinary transition sounds better.
+  static bool _secondOutputSoundsTheSame(MusicPlayerBackgroundTask player) {
+    if (player.equalizer?.enabled ?? false) return false;
+    if (NightModeService.isActive) return false;
+    final (speaking, preparing, _) = DjVoiceService.status.value;
+    return !speaking && !preparing && DjVoiceService.effectiveProfile.settings.mode == DjVoiceMode.off;
+  }
+
+  static TempoMatch? _tempoFor(Duration duration, String? currentId, String? nextId) {
+    if (!_tempoEnabled || !tempoMatchingSupported || currentId == null || nextId == null) return null;
+    if (_nextPlayer == null || currentId != _currentTrack || nextId != _nextTrack) return null;
+    if (GetIt.instance.isRegistered<MusicPlayerBackgroundTask>()) {
+      final player = GetIt.instance<MusicPlayerBackgroundTask>();
+      if (player.speed != 1.0) return null;
+      // The covering player plays at its own, normal pitch, so a shifted pitch would jump at the hand-over.
+      final pitch = GetIt.instance.isRegistered<QueueService>() ? GetIt.instance<QueueService>().playbackPitch : 1.0;
+      if (pitch != 1.0) return null;
+      if (Platform.isAndroid && !_secondOutputSoundsTheSame(player)) return null;
+    }
+    final current = AnalyzerService.cached(currentId), next = AnalyzerService.cached(nextId);
+    if (current == null ||
+        next == null ||
+        next.firstBeat == null ||
+        !next.firstBeat!.isFinite ||
+        next.firstBeat! < 0 ||
+        next.firstBeat! > 8) {
+      return null;
+    }
+    final length = ListeningPreferences.fadeSeconds(currentId, nextId, _settings.seconds).toDouble();
+    final normal = crossfadeWindow(
+      duration: duration.inMilliseconds / 1000,
+      length: length,
+      current: current,
+      next: next,
+      bars: HarmonicMixing.enabled,
+    );
+    if (normal == null || current.lastBeat == null || current.lastBeat! < normal.end - length - 4) return null;
+    if (!canCoverNativeTail(
+      untilBoundary: duration - Duration(microseconds: (normal.start * 1000000).round()) + const Duration(seconds: 1),
+      incomingDuration: _nextPlayer?.duration,
+    )) {
+      return null;
+    }
+    // The small margin covers a beat-alignment adjustment and player command latency.
+    final bpm = current.beatBpm ?? current.bpm;
+    if (bpm == null || bpm < 50 || bpm > 220) return null;
+    final margin = (HarmonicMixing.enabled ? 120 : 60) / bpm;
+    return TempoMatch.plan(
+      outgoingBpm: bpm,
+      incomingBpm: next.beatBpm ?? next.bpm,
+      availableSeconds: normal.end - normal.start - margin,
+      firstBeat: next.firstBeat!,
+    );
+  }
+
   /// Where in the current song (of [duration]) the crossfade starts and ends. Without analysis that's the song's last
   /// [seconds]. With it, the fade ends where the song's sound ends (before trailing silence or a hidden track), the
   /// next song's leading silence is played under the fade rather than after it, and the next song's first beat lands
@@ -414,12 +559,17 @@ class CrossfadeService {
     final current = currentId == null ? null : AnalyzerService.cached(currentId);
     if (current == null) return fallback;
     final next = nextId == null ? null : AnalyzerService.cached(nextId);
+    final tempo = currentId == _currentTrack && nextId == _nextTrack
+        ? _tempoMatch ?? _tempoFor(duration, currentId, nextId)
+        : null;
     final window = crossfadeWindow(
       duration: duration.inMilliseconds / 1000,
       length: seconds.toDouble(),
       current: current,
       next: next,
       bars: HarmonicMixing.enabled,
+      nextBeatElapsed: tempo != null && next?.firstBeat != null ? tempo.elapsedAt(next!.firstBeat!) : null,
+      nextStartElapsed: tempo != null && next?.start != null ? tempo.elapsedAt(next!.start!) : null,
     );
     if (window == null) return fallback;
     return (
@@ -437,16 +587,20 @@ class CrossfadeService {
     required TrackAnalysis current,
     TrackAnalysis? next,
     bool bars = false,
+    double? nextBeatElapsed,
+    double? nextStartElapsed,
   }) {
     final end = current.end;
     if (end == null || current.duration == null || (current.duration! - duration).abs() > 3) return null;
     // Not into the song's body: a fade can only end so far before the file's end.
     if (end > duration || end < duration * 0.5 || end < length * 3) return null;
     // The next song's silence before its sound starts runs under the fade, so its sound starts on time.
-    final lead = min(3.0, next?.start ?? 0.0);
+    final lead = min(3.0, nextStartElapsed ?? next?.start ?? 0.0);
     final target = end - length - lead;
     var start = target;
-    final bpm = current.beatBpm ?? current.bpm, lastBeat = current.lastBeat, firstBeat = next?.firstBeat;
+    final bpm = current.beatBpm ?? current.bpm,
+        lastBeat = current.lastBeat,
+        firstBeat = nextBeatElapsed ?? next?.firstBeat;
     // Only where this song still has a beat near the fade: counted back from far off, any tempo drift adds up.
     if (bpm != null &&
         bpm >= 50 &&
@@ -454,7 +608,8 @@ class CrossfadeService {
         lastBeat != null &&
         lastBeat >= end - length - 4 &&
         firstBeat != null &&
-        firstBeat <= 8) {
+        firstBeat >= 0 &&
+        (next?.firstBeat ?? firstBeat) <= 8) {
       // This song's beats counted back from its last one; the next song starts so its first beat falls on one.
       final beat = 60 / bpm;
       final steps = ((lastBeat - firstBeat - target) / beat).round();
@@ -610,7 +765,15 @@ class CrossfadeService {
       }
       return _skipCrossfade('native hand-over failed: $status', skipCurrent: false);
     }
-    if (Platform.isAndroid) return _skipCrossfade('native hand-over unavailable', skipCurrent: false);
+    if (Platform.isAndroid && _tempoMatch == null) {
+      return _skipCrossfade('native hand-over unavailable', skipCurrent: false);
+    }
+    if (_tempoMatch != null) {
+      // The planned ramp has finished before this boundary; never transfer its speed to the main player.
+      _tempoHandover = true;
+      await nextPlayer.setSpeed(1.0);
+      if (_nextPlayer != nextPlayer) return;
+    }
     await _catchUp();
   }
 
@@ -619,10 +782,13 @@ class CrossfadeService {
     final nextPlayer = _nextPlayer!;
     final id = _nextId;
     final player = GetIt.instance<MusicPlayerBackgroundTask>();
+    final generation = _generation;
+    bool live() => generation == _generation && _nextPlayer == nextPlayer && _stillOn(id);
     if (!_stillOn(id)) return _giveUp("the main player moved on to another song");
+    final baseSpeed = _tempoHandover ? 1.0 : player.speed;
+    _catchUpBaseSpeed = baseSpeed;
     // Silent while catching up: the main player starts the new song from the top, which mustn't be heard twice.
     await player.setTransitionVolume(0);
-    final baseSpeed = player.speed;
     var gaveUp = false;
     try {
       // How long a seek takes varies a lot (over half a second on a slow stream), so it can't land exactly. Seek
@@ -632,11 +798,17 @@ class CrossfadeService {
         final target = nextPosition + const Duration(milliseconds: 250);
         final duration = player.playerDuration;
         // Never past the song's end: that ends it at once and starts the next one.
-        if (!_stillOn(id) || (duration != null && target > duration - const Duration(seconds: 2))) {
+        if (!live() || (duration != null && target > duration - const Duration(seconds: 2))) {
           gaveUp = true;
           throw StateError("the main player isn't on the crossfaded song any more");
         }
-        await player.seek(target, userInitiated: false);
+        // Waited for however long it takes: the second player keeps covering until the main one is really there, and a
+        // seek given up on would still land later, from a stale spot.
+        await _seekForHandover(player, target);
+        if (!live()) {
+          gaveUp = true;
+          throw StateError("the crossfade was cancelled during the seek");
+        }
         // Streams may need a moment to buffer at the new spot; the second player covers for it.
         await player.playbackState
             .firstWhere((state) => state.processingState == AudioProcessingState.ready)
@@ -647,7 +819,13 @@ class CrossfadeService {
       for (var attempt = 0; attempt < 8; attempt++) {
         // Positions only settle once audio is flowing.
         await Future<void>.delayed(const Duration(milliseconds: 300));
+        if (!live()) return;
+        // The covering player is what's heard meanwhile, so it follows the music's level, such as the dip while the
+        // DJ talks, which only reaches the main player on its own.
+        await nextPlayer.setVolume(player.crossfadeBaseVolume * _nextGain);
+        if (!live()) return;
         final (mainPosition, secondPosition) = await _positions(player, nextPlayer);
+        if (!live()) return;
         // Positive: the main player is behind the second player.
         final drift = secondPosition - mainPosition;
         _logger.info("Crossfade hand-over drift: ${drift.inMilliseconds} ms");
@@ -660,21 +838,24 @@ class CrossfadeService {
         final span = max(1000, drift.inMilliseconds.abs() * 2);
         await player.setSpeed(baseSpeed * (1 + drift.inMilliseconds / span));
         await Future<void>.delayed(Duration(milliseconds: span));
+        if (!live()) return;
         await player.setSpeed(baseSpeed);
       }
     } catch (e) {
       _logger.info("Crossfade hand-over was rough: $e");
     } finally {
-      if (player.speed != baseSpeed) await player.setSpeed(baseSpeed);
+      if (generation == _generation && player.speed != baseSpeed) await player.setSpeed(baseSpeed);
     }
+    if (!live()) return;
     if (gaveUp || !_stillOn(id)) return _giveUp("the main player moved on to another song");
     // Blend instead of switching: whatever drift is left is smeared over the ramp instead of heard as a jump.
-    final nextVolume = nextPlayer.volume;
     const steps = 12;
     for (var step = 1; step <= steps; step++) {
-      if (_nextPlayer != nextPlayer) return;
+      if (!live()) return;
       await player.setTransitionVolume(step / steps);
-      await nextPlayer.setVolume(nextVolume * (1 - step / steps));
+      if (!live()) return;
+      // At the music's level now, which a DJ line may be lowering.
+      await nextPlayer.setVolume(player.crossfadeBaseVolume * _nextGain * (1 - step / steps));
       await Future<void>.delayed(const Duration(milliseconds: 25));
     }
     await player.setTransitionVolume(1.0);
@@ -702,18 +883,42 @@ class CrossfadeService {
   }
 
   static Future<void> _cancel({bool restoreVolume = true}) async {
+    _generation++;
     PlaybackPreparationCoordinator.shared.cancel('crossfade');
     _preparing = false;
     final nextPlayer = _nextPlayer;
     _nextPlayer = null;
     _nextId = null;
     final wasFading = _fading;
+    final wasTempo = _tempoMatch != null || _tempoHandover;
+    if (wasTempo && _timer != null) {
+      _timer!.cancel();
+      _timer = Timer.periodic(const Duration(milliseconds: 100), (_) => unawaited(_tick()));
+    }
+    // The main player was at 1x when the ramp was planned; the listener may have chosen a speed since.
+    final restoreSpeed = wasTempo ? FinampSettingsHelper.finampSettings.playbackSpeed : _catchUpBaseSpeed;
+    _catchUpBaseSpeed = null;
+    _tempoMatch = null;
+    _tempoHandover = false;
     _fading = false;
     _priming = false;
     _nativeTried = false;
     _primeStarted = null;
     _scheduledWindow = null;
     _mixed = null;
+    if (restoreSpeed != null) {
+      // Restore the main player even if the incoming player's platform call fails.
+      await Future.wait<void>(
+        [
+          if (nextPlayer != null) nextPlayer.setSpeed(1.0),
+          GetIt.instance<MusicPlayerBackgroundTask>().setSpeed(restoreSpeed),
+        ].map(
+          (operation) => operation.catchError((Object error) {
+            _logger.warning('Could not restore crossfade speed', error);
+          }),
+        ),
+      );
+    }
     await _bridge<void>("disarm");
     if (restoreVolume && wasFading) await GetIt.instance<MusicPlayerBackgroundTask>().setTransitionVolume(1.0);
     if (nextPlayer != null) {
