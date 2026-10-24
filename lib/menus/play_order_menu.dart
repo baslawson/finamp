@@ -1,5 +1,6 @@
 import 'package:finamp/components/fun_heading.dart';
 import 'package:finamp/components/global_snackbar.dart';
+import 'package:finamp/components/harmonic_mixing_switch.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/menus/components/playbackActions/playback_action.dart';
 import 'package:finamp/models/finamp_models.dart';
@@ -55,7 +56,13 @@ enum _PlayOrder { inOrder, shuffle, harmonic }
 /// Picks how the rest of the queue plays: in order, shuffled, or in harmonic order. Opened by long-pressing a shuffle
 /// button.
 Future<void> showPlayOrderMenu(BuildContext context) {
-  return showModalBottomSheet<void>(context: context, showDragHandle: true, builder: (_) => const _PlayOrderMenu());
+  // As tall as it needs, scrolling on a short screen, with room for the harmonic strength.
+  return showModalBottomSheet<void>(
+    context: context,
+    showDragHandle: true,
+    isScrollControlled: true,
+    builder: (_) => const _PlayOrderMenu(),
+  );
 }
 
 class _PlayOrderMenu extends ConsumerWidget {
@@ -102,35 +109,39 @@ class _PlayOrderMenu extends ConsumerWidget {
                 onTap: () => choose(choice),
               );
 
-          return Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: GradientTitle(context.l10n.playOrderMenuTitle, icon: TablerIcons.wave_sine),
-              ),
-              option(
-                _PlayOrder.inOrder,
-                TablerIcons.arrows_right,
-                context.l10n.playOrderInOrder,
-                context.l10n.playOrderInOrderDescription,
-              ),
-              option(
-                _PlayOrder.shuffle,
-                TablerIcons.arrows_shuffle,
-                context.l10n.playOrderShuffle,
-                context.l10n.playOrderShuffleDescription,
-              ),
-              option(
-                _PlayOrder.harmonic,
-                TablerIcons.wave_sine,
-                context.l10n.harmonicOrderButtonLabel,
-                analyzer ? context.l10n.playOrderHarmonicDescription : context.l10n.harmonicMixingNeedsAnalyzer,
-                enabled: analyzer,
-              ),
-              const SizedBox(height: 8),
-            ],
+          return SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                  child: GradientTitle(context.l10n.playOrderMenuTitle, icon: TablerIcons.wave_sine),
+                ),
+                option(
+                  _PlayOrder.inOrder,
+                  TablerIcons.arrows_right,
+                  context.l10n.playOrderInOrder,
+                  context.l10n.playOrderInOrderDescription,
+                ),
+                option(
+                  _PlayOrder.shuffle,
+                  TablerIcons.arrows_shuffle,
+                  context.l10n.playOrderShuffle,
+                  context.l10n.playOrderShuffleDescription,
+                ),
+                option(
+                  _PlayOrder.harmonic,
+                  TablerIcons.wave_sine,
+                  context.l10n.harmonicOrderButtonLabel,
+                  analyzer ? context.l10n.playOrderHarmonicDescription : context.l10n.harmonicMixingNeedsAnalyzer,
+                  enabled: analyzer,
+                ),
+                // Shared with every harmonic mix; letting go puts the rest of the queue in order again at the new strength.
+                if (analyzer) HarmonicStrengthSlider(onChangeEnd: (_) => queueService.refreshHarmonicOrder()),
+                const SizedBox(height: 8),
+              ],
+            ),
           );
         },
       ),

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:finamp/hive_registrar.g.dart';
 import 'package:finamp/models/finamp_models.dart';
@@ -75,10 +76,58 @@ void main() {
     pending.complete(http.Response(jsonEncode({}), 200));
   });
 
+  test('harmonic Radio at 0% strength orders like harmonic mixing off, even at 100% randomness', () async {
+    final box = Hive.box<FinampSettings>('FinampSettings');
+    await box.put('FinampSettings', box.get('FinampSettings')!..shuffleRandomness = 100);
+    final seed = BaseItemDto(id: BaseItemId('seed'), name: 'Seed');
+    final candidates = [for (var i = 0; i < 12; i++) BaseItemDto(id: BaseItemId('c$i'), name: 'C$i')];
+    // Every other song is in the seed's key and tempo; the rest clash.
+    final analysis = {
+      'seed': {'bpm': 120, 'camelot': '8A'},
+      for (var i = 0; i < 12; i++) 'c$i': i.isEven ? {'bpm': 120, 'camelot': '8A'} : {'bpm': 87, 'camelot': '2B'},
+    };
+    Future<List<String>> order({required bool harmonic, required int strength, required int seedNumber}) async {
+      HarmonicMixing.enabled = harmonic;
+      HarmonicMixing.strength.value = strength;
+      final ordered = await http.runWithClient(
+        () => RadioTuning.order(seed, candidates, random: Random(seedNumber)),
+        () => MockClient((request) async => http.Response(jsonEncode(analysis), 200)),
+      );
+      return [for (final track in ordered) track.id.raw];
+    }
+
+    var matchingFirst = 0;
+    for (var i = 0; i < 40; i++) {
+      expect(
+        await order(harmonic: true, strength: 0, seedNumber: i),
+        await order(harmonic: false, strength: 75, seedNumber: i),
+      );
+      final strict = await order(harmonic: true, strength: 100, seedNumber: i);
+      if (int.parse(strict.first.substring(1)).isEven) matchingFirst++;
+    }
+    // A plain random order starts with a matching song about half the time.
+    expect(matchingFirst, greaterThan(30));
+    HarmonicMixing.strength.value = HarmonicMixing.defaultStrength;
+  });
+
   test('the harmonic mixing setting is remembered', () async {
     expect(await HarmonicMixing.load(), false);
     await HarmonicMixing.setEnabled(true);
     HarmonicMixing.enabled = false;
     expect(await HarmonicMixing.load(), true);
+  });
+
+  test('the harmonic strength is shared, remembered and 75% until changed', () async {
+    HarmonicMixing.strength.value = 10;
+    await HarmonicMixing.load();
+    expect(HarmonicMixing.strength.value, HarmonicMixing.defaultStrength);
+    expect(HarmonicMixing.defaultStrength, 75);
+    await HarmonicMixing.setStrength(140);
+    expect(HarmonicMixing.strength.value, 100);
+    await HarmonicMixing.setStrength(40);
+    HarmonicMixing.strength.value = 0;
+    await HarmonicMixing.load();
+    expect(HarmonicMixing.strength.value, 40);
+    HarmonicMixing.strength.value = HarmonicMixing.defaultStrength;
   });
 }

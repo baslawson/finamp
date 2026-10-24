@@ -156,10 +156,13 @@ ${lines.join("\n")}''';
     var shaped = measured >= detailed.length / 2
         ? DjTransitionService.shapeOrder(detailed, (track) => analysis[track.id.raw]?.intensity, shape)
         : null;
-    if (shaped != null && harmonic) {
+    final strength = HarmonicMixing.strength.value;
+    // At 0% harmonic strength key and tempo don't count, so the energy shape stands as it is.
+    if (shaped != null && harmonic && strength > 0) {
       shaped = DjTransitionService.smoothWithinGroups(
         shaped,
         (from, to) => DjTransitionService.transitionCost(analysis[from.id.raw], analysis[to.id.raw]),
+        strength: strength,
       );
     }
     _logger.info(
@@ -174,7 +177,12 @@ ${lines.join("\n")}''';
       items: shaped != null
           ? (artistsRequested ? shaped : DjTransitionService.spreadArtists(shaped))
           : harmonic || await DjTransitionService.isEnabled()
-          ? await DjTransitionService.smoothOrder(detailed, allowArtistRepeats: artistsRequested)
+          ? await DjTransitionService.smoothOrder(
+              detailed,
+              allowArtistRepeats: artistsRequested,
+              // Harmonic mixes follow the harmonic strength; DJ transitions alone always take the best next song.
+              strength: harmonic ? strength : null,
+            )
           : artistsRequested
           ? detailed
           : DjTransitionService.spreadArtists(detailed),
@@ -189,6 +197,7 @@ ${lines.join("\n")}''';
       // would undo it, isn't applied.
       randomizeGenerated: false,
       harmonicOrder: harmonic,
+      keepsShape: shaped != null,
     );
     return mixName;
   }

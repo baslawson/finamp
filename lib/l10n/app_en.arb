@@ -4928,10 +4928,15 @@
     "djWeatherNow": "Now in {place}: {temperature}°, {sky}",
     "@djWeatherNow": {"placeholders": {"place": {"type": "String"}, "temperature": {"type": "int"}, "sky": {"type": "String"}}},
     "harmonicMixing": "Harmonic mixing",
-    "harmonicMixingDescription": "Radio strongly prefers songs in a matching key and tempo, and crossfades bring the next song in on the start of a bar. Smart Shuffle, the Ai DJ and the player's Harmonic button have their own switches.",
+    "harmonicMixingDescription": "Radio prefers songs in a matching key and tempo (as much as the harmonic strength says), and crossfades bring the next song in on the start of a bar. Smart Shuffle, the Ai DJ and the player's Harmonic button have their own switches.",
     "harmonicMixingRadio": "Harmonic mixing for Radio",
     "harmonicMixingMenuDescription": "Each song follows on in a matching key and tempo, so the mix flows like a DJ set",
     "harmonicMixingNeedsAnalyzer": "Needs the analyzer, which knows each song's key and tempo",
+    "harmonicStrengthTitle": "Harmonic strength",
+    "@harmonicStrengthTitle": {"description": "Title of the slider for how closely songs follow on in key and tempo with harmonic mixing"},
+    "harmonicStrengthDescription": "How closely each song follows on in key and tempo, for Radio and every harmonic mix. Harmonic mixes are put in order by it instead of Randomness; Radio uses both.",
+    "harmonicStrengthLoose": "0% · Any key",
+    "harmonicStrengthStrict": "100% · Best match",
     "genreFitTitle": "Match the sound",
     "@genreFitTitle": {
         "description": "Switch for genre mixes (Smart Shuffle, Radio) that leaves out songs that don't sound like the chosen genre"

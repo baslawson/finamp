@@ -1,4 +1,5 @@
 import 'package:finamp/components/global_snackbar.dart';
+import 'package:finamp/components/harmonic_mixing_switch.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/services/analyzer_service.dart';
 import 'package:finamp/services/dj_transition_service.dart';
@@ -136,6 +137,7 @@ class _AnalyzerSettingsScreenState extends State<AnalyzerSettingsScreen> {
               if (mounted) setState(() => _harmonic = enabled);
             },
           ),
+          if (_harmonic) const HarmonicStrengthSlider(padding: EdgeInsets.only(bottom: 8)),
           ListTile(
             contentPadding: EdgeInsets.zero,
             leading: const Icon(TablerIcons.stethoscope),

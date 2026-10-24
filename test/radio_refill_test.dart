@@ -125,6 +125,7 @@ class _Queue extends Fake implements QueueService {
     bool beginPlaying = true,
     bool randomizeGenerated = true,
     bool harmonicOrder = false,
+    bool keepsShape = false,
   }) async {
     this.startingIndex = startingIndex;
     items = ArtistSpacing.prepareStart(items, source, startingIndex: startingIndex).items;

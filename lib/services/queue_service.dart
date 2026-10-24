@@ -27,6 +27,8 @@ import 'package:finamp/services/jellyfin_api_helper.dart';
 import 'package:finamp/services/music_player_background_task.dart';
 import 'package:finamp/services/playback_history_service.dart';
 import 'package:finamp/services/radio_service_helper.dart';
+import 'package:finamp/services/radio_tuning.dart';
+import 'package:finamp/utils/run_again.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:get_it/get_it.dart';
 import 'package:hive_ce_flutter/hive_flutter.dart';
@@ -696,6 +698,9 @@ class QueueService {
     bool randomizeGenerated = true,
     // Whether [items] are already in harmonic order (a harmonic Smart Shuffle or Ai DJ mix), for the Harmonic button.
     bool harmonicOrder = false,
+    // With [harmonicOrder], whether that order also keeps an energy shape (a shaped Ai DJ mix), which a new harmonic
+    // strength mustn't undo by ordering the whole rest of the queue.
+    bool keepsShape = false,
   }) async {
     // _initialQueue = list; // save original PlaybackList for looping/restarting and meta info
 
@@ -724,6 +729,7 @@ class QueueService {
       randomizeGenerated: randomizeGenerated,
     );
     _harmonicOrderStream.add(harmonicOrder);
+    _harmonicKeepsShape = harmonicOrder && keepsShape;
     _queueServiceLogger.info(
       "Started playing '${source.name.getLocalized(GlobalSnackbar.requireL10n)}' (${source.type}) in order $order from index $startingIndex",
     );
@@ -1652,7 +1658,12 @@ class QueueService {
 
   bool get harmonicOrder => _harmonicOrderStream.value;
 
-  bool _settingHarmonicOrder = false;
+  /// One at a time; asked for again while it's being worked out (say, at a new harmonic strength), it's done once more
+  /// when that finishes.
+  late final _orderHarmonicallyAgain = RunAgain(_orderHarmonically);
+
+  /// Whether the queue's harmonic order came with an energy shape (see [startPlayback]'s keepsShape).
+  bool _harmonicKeepsShape = false;
 
   /// Puts the songs after the current one (and after Next up) in harmonic order, each flowing into the next in key
   /// and tempo, or with [enabled] false shuffles them as usual. Earlier songs, the current one and Next up stay put.
@@ -1662,48 +1673,57 @@ class QueueService {
       await setPlaybackOrder(FinampPlaybackOrder.shuffled);
       return true;
     }
-    if (_settingHarmonicOrder) return true;
-    _settingHarmonicOrder = true;
-    try {
-      final sequence = _audioHandler.sequenceState.sequence.map((e) => e.tag as FinampQueueItem).toList();
-      final shuffleIndices = _audioHandler.sequenceState.shuffleIndices;
-      // Positions in play order, each pointing at its song in the player's sequence.
-      final order = _playbackOrder == FinampPlaybackOrder.shuffled && shuffleIndices.length == sequence.length
-          ? [...shuffleIndices]
-          : List.generate(sequence.length, (i) => i);
-      final current = _currentQueueIndex;
-      if (current < 0 || current >= order.length) return false;
-      var restStart = current + 1;
-      while (restStart < order.length && sequence[order[restStart]].type == QueueItemQueueType.nextUp) {
-        restStart++;
-      }
-      final rest = order.sublist(restStart);
-      // Nothing to reorder, so it's already as harmonic as it gets.
-      if (rest.length < 2) {
-        _harmonicOrderStream.add(true);
-        return true;
-      }
-      final reordered = await DjTransitionService.harmonicContinuation(
-        order[restStart - 1],
-        rest,
-        (index) => sequence[index].baseItem,
-        randomness: FinampSettingsHelper.finampSettings.shuffleRandomness,
-        allowArtistRepeats: ArtistSpacing.allowsRepeats(sequence[order[current]].source),
-      );
-      if (reordered == null) return false;
-      // The queue may have moved on while the analysis loaded; only apply the order to the queue it was made for.
-      // (Not a lack of analysis, so no message; tapping again uses the new queue.)
-      if (_currentQueueIndex != current || _audioHandler.sequenceState.sequence.length != sequence.length) {
-        _queueServiceLogger.info("Queue changed while ordering it harmonically; left as it is");
-        return true;
-      }
-      await setPlaybackOrder(FinampPlaybackOrder.shuffled, shuffleOrder: [...order.take(restStart), ...reordered]);
-      _harmonicOrderStream.add(true);
-      _queueServiceLogger.info("Put ${reordered.length} upcoming songs in harmonic order");
-      return true;
-    } finally {
-      _settingHarmonicOrder = false;
+    // Asked for, so the whole rest of the queue goes in harmonic order, whatever shape it had.
+    _harmonicKeepsShape = false;
+    // Done again with the latest strength, unless harmonic order was turned off meanwhile.
+    return _orderHarmonicallyAgain(whileRunning: true, wanted: () => harmonicOrder);
+  }
+
+  /// Puts the rest of the queue in harmonic order again (say, at a new harmonic strength) when it's in harmonic order
+  /// or being put in it. While that's being applied the queue briefly isn't [harmonicOrder], so that alone isn't enough.
+  /// A shaped Ai DJ mix keeps its energy shape instead.
+  Future<void> refreshHarmonicOrder() async {
+    if (_harmonicKeepsShape) return;
+    if (harmonicOrder || _orderHarmonicallyAgain.running) await setHarmonicOrder(true);
+  }
+
+  Future<bool> _orderHarmonically() async {
+    final sequence = _audioHandler.sequenceState.sequence.map((e) => e.tag as FinampQueueItem).toList();
+    final shuffleIndices = _audioHandler.sequenceState.shuffleIndices;
+    // Positions in play order, each pointing at its song in the player's sequence.
+    final order = _playbackOrder == FinampPlaybackOrder.shuffled && shuffleIndices.length == sequence.length
+        ? [...shuffleIndices]
+        : List.generate(sequence.length, (i) => i);
+    final current = _currentQueueIndex;
+    if (current < 0 || current >= order.length) return false;
+    var restStart = current + 1;
+    while (restStart < order.length && sequence[order[restStart]].type == QueueItemQueueType.nextUp) {
+      restStart++;
     }
+    final rest = order.sublist(restStart);
+    // Nothing to reorder, so it's already as harmonic as it gets.
+    if (rest.length < 2) {
+      _harmonicOrderStream.add(true);
+      return true;
+    }
+    final reordered = await DjTransitionService.harmonicContinuation(
+      order[restStart - 1],
+      rest,
+      (index) => sequence[index].baseItem,
+      strength: HarmonicMixing.strength.value,
+      allowArtistRepeats: ArtistSpacing.allowsRepeats(sequence[order[current]].source),
+    );
+    if (reordered == null) return false;
+    // The queue may have moved on while the analysis loaded; only apply the order to the queue it was made for.
+    // (Not a lack of analysis, so no message; tapping again uses the new queue.)
+    if (_currentQueueIndex != current || _audioHandler.sequenceState.sequence.length != sequence.length) {
+      _queueServiceLogger.info("Queue changed while ordering it harmonically; left as it is");
+      return true;
+    }
+    await setPlaybackOrder(FinampPlaybackOrder.shuffled, shuffleOrder: [...order.take(restStart), ...reordered]);
+    _harmonicOrderStream.add(true);
+    _queueServiceLogger.info("Put ${reordered.length} upcoming songs in harmonic order");
+    return true;
   }
 
   void toggleLoopMode() {

@@ -7,6 +7,7 @@ import 'package:finamp/services/skip_service.dart';
 import 'package:finamp/services/shuffle_randomness.dart';
 import 'package:finamp/services/finamp_settings_helper.dart';
 import 'package:finamp/models/finamp_models.dart';
+import 'package:flutter/foundation.dart';
 import 'package:logging/logging.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -17,13 +18,23 @@ class HarmonicMixing {
   HarmonicMixing._();
 
   static const _key = 'harmonicMixing';
+  static const _strengthKey = 'harmonicMixingStrength';
+
+  /// How closely songs follow on in key and tempo with harmonic mixing, in percent, unless changed.
+  static const defaultStrength = 75;
+
+  /// "Harmonic strength", shared by Radio and every harmonic mix: at 100% each song is the best match for the one
+  /// before, at 0% key and tempo don't count. Loaded at startup by [load] and kept up to date by [setStrength].
+  static final strength = ValueNotifier<int>(defaultStrength);
 
   /// Read synchronously while mixing; loaded at startup and kept up to date by [setEnabled].
   static bool enabled = false;
 
   static Future<bool> load() async {
     try {
-      return enabled = await SharedPreferencesAsync().getBool(_key) ?? false;
+      final preferences = SharedPreferencesAsync();
+      strength.value = (await preferences.getInt(_strengthKey) ?? defaultStrength).clamp(0, 100);
+      return enabled = await preferences.getBool(_key) ?? false;
     } catch (_) {
       return enabled;
     }
@@ -32,6 +43,11 @@ class HarmonicMixing {
   static Future<void> setEnabled(bool value) async {
     enabled = value;
     await SharedPreferencesAsync().setBool(_key, value);
+  }
+
+  static Future<void> setStrength(int value) async {
+    strength.value = value.clamp(0, 100);
+    await SharedPreferencesAsync().setInt(_strengthKey, strength.value);
   }
 
   /// Whether a menu's own harmonic mixing switch is on, off until it's turned on. Separate from Radio's setting above.
@@ -78,8 +94,8 @@ class RadioTuning {
       _logger.fine("No analysis for radio tuning", e);
     }
     final seedAnalysis = analysis[seed.id.raw];
-    // Harmonic mixing makes a clash in key or tempo count four times as much.
-    final strictness = HarmonicMixing.enabled ? 1.0 : 0.25;
+    final harmonic = HarmonicMixing.enabled;
+    final strictness = harmonic ? harmonicStrictness(HarmonicMixing.strength.value) : 0.25;
     double weight(BaseItemDto track) {
       var weight = chance(track.id.raw);
       final trackAnalysis = analysis[track.id.raw];
@@ -93,9 +109,17 @@ class RadioTuning {
       candidates,
       weight,
       randomness: FinampSettingsHelper.finampSettings.shuffleRandomness,
+      // With harmonic mixing even a fully random order leans towards songs in a matching key and tempo, unless the
+      // strength is 0%, which is the same as harmonic mixing off.
+      weightedRandom: harmonic && HarmonicMixing.strength.value > 0,
       random: random,
     );
   }
+
+  /// How much a clash in key or tempo counts with harmonic mixing at [strength] (percent): as little as without it at
+  /// 0%, four times as much at the default 75%, and more above.
+  static double harmonicStrictness(int strength) =>
+      0.25 * pow(4, strength.clamp(0, 100) / HarmonicMixing.defaultStrength).toDouble();
 
   static List<T> rankByWeight<T>(List<T> items, double Function(T item) weight) {
     final keyed = [for (final (index, item) in items.indexed) (item: item, index: index, weight: weight(item))]
@@ -106,11 +130,39 @@ class RadioTuning {
     return [for (final entry in keyed) entry.item];
   }
 
-  /// Low randomness follows the suitability ranking; 100% uses a random order.
+  /// Low randomness follows the suitability ranking; 100% uses a random order, or with [weightedRandom] a random order
+  /// in which heavier items tend to come first.
   static List<T> weightedShuffle<T>(
     List<T> items,
     double Function(T item) weight, {
     Random? random,
     int randomness = DefaultSettings.shuffleRandomness,
-  }) => ShuffleRandomness.order(rankByWeight(items, weight), randomness, random: random);
+    bool weightedRandom = false,
+  }) {
+    final ranked = rankByWeight(items, weight);
+    if (!weightedRandom) return ShuffleRandomness.order(ranked, randomness, random: random);
+    final amount = randomness.clamp(0, 100) / 100;
+    if (amount == 0 || ranked.length < 2) return ranked;
+    final dice = random ?? Random();
+    // A weighted random order (each item's key is a random number to the power of 1 / weight, highest first), blended
+    // with the ranking the way the shared randomizer blends in a plain random order.
+    final drawn = [
+      for (final (index, item) in ranked.indexed)
+        (index: index, key: pow(dice.nextDouble(), 1 / max(weight(item), 1e-9)).toDouble()),
+    ]..sort((a, b) => b.key.compareTo(a.key));
+    final place = List.filled(ranked.length, 0);
+    for (final (position, entry) in drawn.indexed) {
+      place[entry.index] = position;
+    }
+    final last = ranked.length - 1;
+    final scored =
+        [
+          for (var index = 0; index < ranked.length; index++)
+            (index: index, score: (1 - amount) * index / last + amount * place[index] / last),
+        ]..sort((a, b) {
+          final score = a.score.compareTo(b.score);
+          return score == 0 ? a.index.compareTo(b.index) : score;
+        });
+    return [for (final entry in scored) ranked[entry.index]];
+  }
 }

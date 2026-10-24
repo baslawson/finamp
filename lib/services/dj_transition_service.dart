@@ -230,8 +230,13 @@ class DjTransitionService {
   }
 
   /// Reorders [tracks] so each one flows into the next, keeping the first track first,
-  /// without the same artist twice in a row.
-  static Future<List<BaseItemDto>> smoothOrder(List<BaseItemDto> tracks, {bool allowArtistRepeats = false}) async {
+  /// without the same artist twice in a row. With a harmonic [strength] (percent) each next song is one of the best
+  /// matches, fewer the higher it is (see [harmonicOrder]); without, always the best.
+  static Future<List<BaseItemDto>> smoothOrder(
+    List<BaseItemDto> tracks, {
+    bool allowArtistRepeats = false,
+    int? strength,
+  }) async {
     List<BaseItemDto> spaced(List<BaseItemDto> items) => allowArtistRepeats ? items : spreadArtists(items);
     if (tracks.length < 3 || !await AnalyzerService.isConfigured()) return spaced(tracks);
     // Reuses the last hour's answers, so a mix ordered right after its songs were looked up costs no extra request.
@@ -242,7 +247,18 @@ class DjTransitionService {
     }
     _analysis.addAll(analysis);
     final cost = cachedTransitionCost();
-    return spaced(orderByCost(tracks, (a, b) => cost(analysis[a.id.raw], analysis[b.id.raw])));
+    double step(BaseItemDto a, BaseItemDto b) => cost(analysis[a.id.raw], analysis[b.id.raw]);
+    if (strength == null) return spaced(orderByCost(tracks, step));
+    return spaced([
+      tracks.first,
+      ...harmonicOrder(
+        tracks.sublist(1),
+        step,
+        known: (track) => analysis.containsKey(track.id.raw),
+        strength: strength,
+        after: tracks.first,
+      ),
+    ]);
   }
 
   /// Moves tracks as little as possible so the same artist doesn't play twice in a row.
@@ -320,15 +336,12 @@ class DjTransitionService {
   /// How long a harmonic shuffle waits for fresh analysis before ordering with what's already known.
   static const harmonicAnalysisWait = Duration(seconds: 5);
 
-  /// The most songs a harmonic shuffle picks the next one from, at full shuffle randomness.
-  static const _harmonicChoices = 8;
-
   /// [tracks] in a random order where each song flows into the next in key and tempo, for harmonic mixing.
-  /// [randomness] (percent) is the shuffle randomness. Null when too few of them have been analysed for it to work,
+  /// [strength] (percent) is the harmonic strength (see [harmonicOrder]). Null when too few of them have been analysed for it to work,
   /// so the caller shuffles as usual.
   static Future<List<BaseItemDto>?> harmonicShuffle(
     List<BaseItemDto> tracks, {
-    required int randomness,
+    required int strength,
     Random? random,
   }) async {
     if (tracks.length < 3 || !await AnalyzerService.isConfigured()) return null;
@@ -344,7 +357,7 @@ class DjTransitionService {
         tracks,
         (from, to) => cost(analysis[from.id.raw], analysis[to.id.raw]),
         known: (track) => analysis.containsKey(track.id.raw),
-        randomness: randomness,
+        strength: strength,
         random: random,
       ),
     );
@@ -357,13 +370,15 @@ class DjTransitionService {
     T after,
     List<T> items,
     BaseItemDto Function(T item) track, {
-    required int randomness,
+    required int strength,
     bool allowArtistRepeats = false,
     Random? random,
   }) async {
     if (items.length < 2 || !await AnalyzerService.isConfigured()) return null;
     // Looked up once each: the ordering compares every pair it considers, and [track] may be costly.
-    final songs = {for (final item in [after, ...items]) item: track(item)};
+    final songs = {
+      for (final item in [after, ...items]) item: track(item),
+    };
     final ids = [for (final song in songs.values) song.id.raw];
     final analysis = await AnalyzerService.cachedAnalysis(
       ids,
@@ -377,7 +392,7 @@ class DjTransitionService {
       items,
       (from, to) => cost(analysed(from), analysed(to)),
       known: (item) => analysed(item) != null,
-      randomness: randomness,
+      strength: strength,
       after: after,
       random: random,
     );
@@ -386,15 +401,17 @@ class DjTransitionService {
     return ArtistSpacing.order(ordered, artist, previousKey: artist(after), keepFirst: false);
   }
 
-  /// A random walk through [items] where each step goes to one of the best fitting items by [cost]: always the best
-  /// at no [randomness] (percent), one of the best [_harmonicChoices] at full randomness. Items that aren't [known]
+  /// A random walk through [items] where each step goes to one of the best fitting items by [cost], how many set by
+  /// the harmonic [strength] (percent): always the best at 100%, any at 0%, and in between a share of the pool that
+  /// stays about the same feel whatever its size (the pool's size to the power of 1 - strength: for 200 songs about 4
+  /// at 75%, 14 at 50%). Items that aren't [known]
   /// (not analysed) are spread evenly through the walk, in random order. Starts from a random item, or carries on
   /// from [after] (not part of the result) when given.
   static List<T> harmonicOrder<T>(
     List<T> items,
     double Function(T from, T to) cost, {
     required bool Function(T item) known,
-    required int randomness,
+    required int strength,
     T? after,
     Random? random,
   }) {
@@ -402,22 +419,28 @@ class DjTransitionService {
     final remaining = items.where(known).toList();
     final unknown = items.where((item) => !known(item)).toList()..shuffle(dice);
     if (remaining.isEmpty) return unknown;
-    final choices = 1 + ((_harmonicChoices - 1) * randomness.clamp(0, 100) / 100).round();
+    final choices = max(1, pow(remaining.length, 1 - strength.clamp(0, 100) / 100).round());
     final walk = [after ?? remaining.removeAt(dice.nextInt(remaining.length))];
     while (remaining.isNotEmpty) {
-      // Only the best few can be picked, so keep just those (cheapest first) rather than sorting every item.
-      final best = <({int index, double cost})>[];
-      for (final (index, item) in remaining.indexed) {
-        final step = (index: index, cost: cost(walk.last, item));
-        if (best.length == choices && step.cost >= best.last.cost) continue;
-        var place = best.length;
-        while (place > 0 && best[place - 1].cost > step.cost) {
-          place--;
+      final int next;
+      if (choices >= remaining.length) {
+        // Any of them may come next, so there's nothing to compare.
+        next = dice.nextInt(remaining.length);
+      } else if (choices == 1) {
+        // The best, the first of equally good ones.
+        var best = 0;
+        var bestCost = cost(walk.last, remaining.first);
+        for (var i = 1; i < remaining.length; i++) {
+          final step = cost(walk.last, remaining[i]);
+          if (step < bestCost) (best, bestCost) = (i, step);
         }
-        best.insert(place, step);
-        if (best.length > choices) best.removeLast();
+        next = best;
+      } else {
+        final steps = [for (final (index, item) in remaining.indexed) (index: index, cost: cost(walk.last, item))];
+        _cheapestFirst(steps, choices);
+        next = steps[dice.nextInt(choices)].index;
       }
-      walk.add(remaining.removeAt(best[dice.nextInt(best.length)].index));
+      walk.add(remaining.removeAt(next));
     }
     if (after != null) walk.removeAt(0);
     final result = <T>[];
@@ -431,27 +454,75 @@ class DjTransitionService {
     return [...result, ...unknown.skip(spread)];
   }
 
-  /// Reorders each run of [size] neighbouring items so it flows best by [cost], counting the step in from the item
-  /// before it, trying every order. Items only move within their run, so a shaped mix keeps its energy arc.
-  static List<T> smoothWithinGroups<T>(List<T> items, double Function(T from, T to) cost, {int size = 4}) {
-    final result = <T>[];
-    for (var start = 0; start < items.length; start += size) {
-      List<T>? best;
-      var bestCost = double.infinity;
-      // The first order tried is the current one, which wins ties.
-      for (final order in _permutations(items.sublist(start, min(start + size, items.length)))) {
-        var total = result.isEmpty ? 0.0 : cost(result.last, order.first);
-        for (var i = 1; i < order.length; i++) {
-          total += cost(order[i - 1], order[i]);
+  /// Moves the [count] cheapest of [steps] to its start, in no particular order, without sorting the rest
+  /// (quickselect), so picking among many of the best stays quick in a big pool.
+  static void _cheapestFirst(List<({int index, double cost})> steps, int count) {
+    final wanted = count - 1;
+    var low = 0, high = steps.length - 1;
+    while (low < high) {
+      final pivot = steps[(low + high) >> 1].cost;
+      var i = low, j = high;
+      while (i <= j) {
+        while (steps[i].cost < pivot) {
+          i++;
         }
-        if (total < bestCost) {
-          bestCost = total;
-          best = order;
+        while (steps[j].cost > pivot) {
+          j--;
+        }
+        if (i <= j) {
+          final swapped = steps[i];
+          steps[i] = steps[j];
+          steps[j] = swapped;
+          i++;
+          j--;
         }
       }
-      result.addAll(best!);
+      if (wanted <= j) {
+        high = j;
+      } else if (wanted >= i) {
+        low = i;
+      } else {
+        return;
+      }
+    }
+  }
+
+  /// Reorders each run of [size] neighbouring items so it flows best by [cost], counting the step in from the item
+  /// before it, trying every order. Items only move within their run, so a shaped mix keeps its energy arc. Below
+  /// full harmonic [strength] (percent) a run takes one of its best orders instead, more of them to choose from the
+  /// lower it is (as in [harmonicOrder]), and any at 0%.
+  static List<T> smoothWithinGroups<T>(
+    List<T> items,
+    double Function(T from, T to) cost, {
+    int size = 4,
+    int strength = 100,
+    Random? random,
+  }) {
+    final dice = random ?? Random();
+    final result = <T>[];
+    for (var start = 0; start < items.length; start += size) {
+      final orders = [
+        for (final order in _permutations(items.sublist(start, min(start + size, items.length))))
+          (order: order, total: _pathCost(order, cost, before: result.lastOrNull)),
+      ];
+      final choices = max(1, pow(orders.length, 1 - strength.clamp(0, 100) / 100).round());
+      // Cheapest first; the first order tried is the current one, which wins ties.
+      final ranked = [...orders.indexed]
+        ..sort((a, b) {
+          final total = a.$2.total.compareTo(b.$2.total);
+          return total == 0 ? a.$1.compareTo(b.$1) : total;
+        });
+      result.addAll(ranked[choices == 1 ? 0 : dice.nextInt(min(choices, ranked.length))].$2.order);
     }
     return result;
+  }
+
+  static double _pathCost<T>(List<T> order, double Function(T from, T to) cost, {T? before}) {
+    var total = before == null ? 0.0 : cost(before, order.first);
+    for (var i = 1; i < order.length; i++) {
+      total += cost(order[i - 1], order[i]);
+    }
+    return total;
   }
 
   static Iterable<List<T>> _permutations<T>(List<T> items) sync* {

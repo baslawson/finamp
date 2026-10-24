@@ -65,13 +65,13 @@ void main() {
     double distance(int a, int b) => (a - b).abs().toDouble();
     bool always(int item) => true;
 
-    test("always takes the best next item at no randomness", () {
+    test("always takes the best next item at full strength", () {
       final items = [for (var i = 0; i < 20; i++) i * 7 % 20];
       final ordered = DjTransitionService.harmonicOrder(
         items,
         distance,
         known: always,
-        randomness: 0,
+        strength: 100,
         random: Random(3),
       );
       expect(ordered.toSet(), items.toSet());
@@ -81,17 +81,18 @@ void main() {
       expect(jumps.length, lessThanOrEqualTo(1));
     });
 
-    test("picks among the best few at full randomness, the same way for the same seed", () {
+    test("picks among the best few at the default strength, the same way for the same seed", () {
       final items = [for (var i = 0; i < 40; i++) i];
       List<int> order(int seed) =>
-          DjTransitionService.harmonicOrder(items, distance, known: always, randomness: 100, random: Random(seed));
+          DjTransitionService.harmonicOrder(items, distance, known: always, strength: 75, random: Random(seed));
       final ordered = order(7);
       expect(order(7), ordered);
       expect(ordered.toSet(), items.toSet());
       final remaining = {...items}..remove(ordered.first);
       for (var i = 1; i < ordered.length; i++) {
         final better = remaining.where((item) => distance(ordered[i - 1], item) < distance(ordered[i - 1], ordered[i]));
-        expect(better.length, lessThan(8));
+        // 40 songs to the power of 0.25: one of the best 3.
+        expect(better.length, lessThan(3));
         remaining.remove(ordered[i]);
       }
     });
@@ -102,7 +103,7 @@ void main() {
         items,
         distance,
         known: (item) => item >= 0,
-        randomness: 0,
+        strength: 100,
         random: Random(1),
       );
       expect(ordered.toSet(), items.toSet());
@@ -116,7 +117,7 @@ void main() {
         [1, 9, 4, 7, 2],
         distance,
         known: always,
-        randomness: 0,
+        strength: 100,
         after: 5,
         random: Random(2),
       );
@@ -126,12 +127,76 @@ void main() {
       expect(ordered, [4, 2, 1, 7, 9]);
     });
 
+    test("ignores key and tempo at no strength", () {
+      final items = [for (var i = 0; i < 40; i++) i];
+      // A walk by nearest neighbour hardly ever jumps far; a plain shuffle often does.
+      var far = 0;
+      for (var seed = 0; seed < 5; seed++) {
+        final ordered = DjTransitionService.harmonicOrder(
+          items,
+          distance,
+          known: always,
+          strength: 0,
+          random: Random(seed),
+        );
+        expect(ordered.toSet(), items.toSet());
+        far += [
+          for (var i = 1; i < ordered.length; i++) distance(ordered[i - 1], ordered[i]),
+        ].where((d) => d > 5).length;
+      }
+      expect(far, greaterThan(5 * 20));
+    });
+
+    test("a bigger pool has more to choose from at the same strength", () {
+      int worstRank(int size) {
+        final items = [for (var i = 0; i < size; i++) i];
+        var worst = 0;
+        for (var seed = 0; seed < 5; seed++) {
+          final ordered = DjTransitionService.harmonicOrder(
+            items,
+            distance,
+            known: always,
+            strength: 50,
+            random: Random(seed),
+          );
+          final remaining = {...items}..remove(ordered.first);
+          for (var i = 1; i < ordered.length; i++) {
+            final step = distance(ordered[i - 1], ordered[i]);
+            worst = max(worst, remaining.where((item) => distance(ordered[i - 1], item) < step).length);
+            remaining.remove(ordered[i]);
+          }
+        }
+        return worst;
+      }
+
+      // About the square root of the pool at 50%: one of the best 3 of 9 songs, of the best 14 of 200.
+      expect(worstRank(9), lessThan(3));
+      expect(worstRank(200), greaterThanOrEqualTo(3));
+      expect(worstRank(200), lessThan(14));
+    });
+
+    test("stays quick for a big pool at any strength", () {
+      final items = [for (var i = 0; i < 2000; i++) i * 7919 % 2000];
+      for (final strength in [0, 1, 25, 50, 100]) {
+        final clock = Stopwatch()..start();
+        final ordered = DjTransitionService.harmonicOrder(
+          items,
+          distance,
+          known: always,
+          strength: strength,
+          random: Random(strength),
+        );
+        expect(ordered.toSet(), items.toSet(), reason: "$strength%");
+        expect(clock.elapsed, lessThan(const Duration(seconds: 2)), reason: "$strength%");
+      }
+    });
+
     test("keeps everything when nothing is analysed", () {
       final ordered = DjTransitionService.harmonicOrder(
         [1, 2, 3],
         distance,
         known: (_) => false,
-        randomness: 50,
+        strength: 50,
         random: Random(1),
       );
       expect(ordered.toSet(), {1, 2, 3});
@@ -158,6 +223,30 @@ void main() {
     test("leaves the order alone when nothing is better", () {
       expect(DjTransitionService.smoothWithinGroups([5, 3, 9, 1, 7], (a, b) => 1), [5, 3, 9, 1, 7]);
       expect(DjTransitionService.smoothWithinGroups(<int>[], distance), isEmpty);
+    });
+
+    test("takes one of a run's better orders below full strength, and any at none", () {
+      final run = [40, 0, 30, 10];
+      double total(List<int> order) =>
+          [for (var i = 1; i < order.length; i++) distance(order[i - 1], order[i])].fold(0.0, (a, b) => a + b);
+      final best = total(DjTransitionService.smoothWithinGroups(run, distance));
+      final seen = <String>{}, loose = <String>{};
+      for (var seed = 0; seed < 60; seed++) {
+        final half = DjTransitionService.smoothWithinGroups(run, distance, strength: 50, random: Random(seed));
+        final none = DjTransitionService.smoothWithinGroups(run, distance, strength: 0, random: Random(seed));
+        expect(half.toSet(), run.toSet());
+        // 24 orders to the power of 0.5: one of the best 5, so never far worse than the best.
+        expect(total(half), lessThanOrEqualTo(best + 20));
+        seen.add(half.join(","));
+        loose.add(none.join(","));
+        // Still only within the run.
+        expect(
+          DjTransitionService.smoothWithinGroups([...run, 99], distance, strength: 0, random: Random(seed)).last,
+          99,
+        );
+      }
+      expect(seen.length, greaterThan(1));
+      expect(loose.length, greaterThan(seen.length));
     });
   });
 }

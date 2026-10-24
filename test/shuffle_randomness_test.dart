@@ -179,6 +179,39 @@ void main() {
     );
   });
 
+  test('harmonic Radio still prefers matching songs at 100% randomness', () {
+    var heavyFirst = 0;
+    for (var seed = 0; seed < 400; seed++) {
+      final order = RadioTuning.weightedShuffle(
+        ['light', 'heavy', 'middle'],
+        (item) => switch (item) {
+          'heavy' => 1.0,
+          'middle' => 0.3,
+          _ => 0.1,
+        },
+        randomness: 100,
+        weightedRandom: true,
+        random: Random(seed),
+      );
+      expect(order.toSet(), {'light', 'heavy', 'middle'});
+      if (order.first == 'heavy') heavyFirst++;
+    }
+    // A plain random order would put it first about a third of the time.
+    expect(heavyFirst, greaterThan(220));
+    expect(RadioTuning.weightedShuffle([1, 3, 2], (item) => item.toDouble(), randomness: 0, weightedRandom: true), [
+      3,
+      2,
+      1,
+    ]);
+  });
+
+  test('harmonic strength sets how much a clash in key or tempo counts for Radio', () {
+    expect(RadioTuning.harmonicStrictness(0), closeTo(0.25, 1e-9));
+    expect(RadioTuning.harmonicStrictness(HarmonicMixing.defaultStrength), closeTo(1.0, 1e-9));
+    expect(RadioTuning.harmonicStrictness(100), greaterThan(1.5));
+    expect(RadioTuning.harmonicStrictness(50), lessThan(1.0));
+  });
+
   test('running follows tempo at 0% and keeps its filters at 100%', () {
     final tracks = [
       for (var i = 0; i < 12; i++)

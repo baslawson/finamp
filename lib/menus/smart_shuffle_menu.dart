@@ -106,10 +106,7 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
       }
       // Ordered from the whole pool so each song has the most to choose a good next song from, then cut to length.
       final harmonic = await HarmonicMixing.menuEnabled(HarmonicMixingMenu.smartShuffle)
-          ? await DjTransitionService.harmonicShuffle(
-              tracks,
-              randomness: FinampSettingsHelper.finampSettings.shuffleRandomness,
-            )
+          ? await DjTransitionService.harmonicShuffle(tracks, strength: HarmonicMixing.strength.value)
           : null;
       if (!mounted) return;
       final name = [
