@@ -56,12 +56,34 @@ class GenreEqService {
   /// The preset for a song with [genres]: the first genre with a match wins, so the main genre counts most.
   static GenreEqPreset presetFor(List<String> genres) {
     for (final genre in genres) {
-      final name = genre.toLowerCase();
-      for (final preset in GenreEqPreset.values) {
-        if (preset.keywords.any(name.contains)) return preset;
-      }
+      final preset = _presetForGenre(genre.toLowerCase());
+      if (preset != null) return preset;
     }
     return GenreEqPreset.flat;
+  }
+
+  /// Words that make a style gentle whatever else it names, as in "Soft Rock" or "Indie Folk".
+  static const _gentle = ["soft", "acoustic", "unplugged", "ballad", "easy listening", "mellow", "folk", "singer"];
+
+  /// Words that keep a style loud even with a gentle word, as in "Folk Metal".
+  static const _loud = ["metal", "punk", "hardcore", "grunge"];
+
+  /// The preset for one genre [name] (lower case), or null if it names no style. A compound genre is what its last
+  /// style word says ("Indie Pop" is pop, "Alternative R&B" is R&B, "Synthpop" is pop), unless a gentle word makes it
+  /// acoustic.
+  static GenreEqPreset? _presetForGenre(String name) {
+    if (_gentle.any(name.contains) && !_loud.any(name.contains)) return GenreEqPreset.acoustic;
+    GenreEqPreset? best;
+    var bestAt = -1, bestLength = 0;
+    for (final preset in GenreEqPreset.values) {
+      for (final keyword in preset.keywords) {
+        final at = name.lastIndexOf(keyword);
+        if (at > bestAt || (at == bestAt && at >= 0 && keyword.length > bestLength)) {
+          (best, bestAt, bestLength) = (preset, at, keyword.length);
+        }
+      }
+    }
+    return bestAt < 0 ? null : best;
   }
 
   static Future<void> initialize() async {

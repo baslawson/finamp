@@ -4615,6 +4615,7 @@
     "crossfadeDjTransitionsNote": "Beat-matched DJ transitions (Analyzer settings) pause while crossfade is on.",
     "shuffleRandomness": "Randomness: {percent}%",
     "@shuffleRandomness": {"placeholders": {"percent": {"type": "int"}}},
+    "shuffleRandomnessTitle": "Randomness",
     "shuffleRandomnessPercent": "{percent}%",
     "@shuffleRandomnessPercent": {"placeholders": {"percent": {"type": "int"}}},
     "shuffleRandomnessDescription": "Applies to the next mix or reshuffle. Artist spacing stays on unless you request specific artists.",
@@ -4931,6 +4932,82 @@
     "harmonicMixingRadio": "Harmonic mixing for Radio",
     "harmonicMixingMenuDescription": "Each song follows on in a matching key and tempo, so the mix flows like a DJ set",
     "harmonicMixingNeedsAnalyzer": "Needs the analyzer, which knows each song's key and tempo",
+    "genreFitTitle": "Match the sound",
+    "@genreFitTitle": {
+        "description": "Switch for genre mixes (Smart Shuffle, Radio) that leaves out songs that don't sound like the chosen genre"
+    },
+    "genreFitDescription": "Leaves out songs that are tagged with the genre but don't sound like it, such as ballads in Rock",
+    "@genreFitDescription": {
+        "description": "Subtitle of the Match the sound switch"
+    },
+    "genreFitNeedsAnalyzer": "Needs the analyzer, which listens to each song",
+    "genreDoesntFit": "Doesn't fit {genre}",
+    "@genreDoesntFit": {
+        "description": "Song menu entry during a genre mix: says the song isn't the genre, so it leaves the mix",
+        "placeholders": {
+            "genre": {
+                "type": "String"
+            }
+        }
+    },
+    "genreDoesntFitDone": "Got it, it won't play in {genre} mixes",
+    "@genreDoesntFitDone": {
+        "placeholders": {
+            "genre": {
+                "type": "String"
+            }
+        }
+    },
+    "genreAnswersAction": "Genre…",
+    "@genreAnswersAction": {
+        "description": "Song menu entry that opens a picker to say which genres the song is and isn't"
+    },
+    "genreAnswersTitle": "What genre is {song}?",
+    "@genreAnswersTitle": {
+        "placeholders": {
+            "song": {
+                "type": "String"
+            }
+        }
+    },
+    "genreAnswersHelp": "Tap a genre once if the song is it, twice if it isn't. Genre mixes follow your answers and learn what each genre sounds like from them.",
+    "genreAnswersTagged": "Tagged: {genres}",
+    "@genreAnswersTagged": {
+        "placeholders": {
+            "genres": {
+                "type": "String"
+            }
+        }
+    },
+    "genreAnswersSearch": "Find a genre",
+    "genreAnswersUnavailable": "Couldn't reach the analyzer to load or save answers. Try again later.",
+    "genreAnswersNone": "Say it's {genre}",
+    "@genreAnswersNone": {
+        "placeholders": {
+            "genre": {
+                "type": "String"
+            }
+        }
+    },
+    "genreAnswersIs": "It's {genre}. Tap to say it isn't",
+    "@genreAnswersIs": {
+        "placeholders": {
+            "genre": {
+                "type": "String"
+            }
+        }
+    },
+    "genreAnswersIsnt": "It isn't {genre}. Tap to clear",
+    "@genreAnswersIsnt": {
+        "placeholders": {
+            "genre": {
+                "type": "String"
+            }
+        }
+    },
+    "@genreFitNeedsAnalyzer": {
+        "description": "Subtitle of the Match the sound switch when the analyzer isn't set up"
+    },
     "smartShuffleLength": "Length",
     "smartShuffleAnyLength": "Any length",
     "harmonicOrderButtonLabel": "Harmonic",

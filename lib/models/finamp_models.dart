@@ -2148,6 +2148,7 @@ class QueueItemSource {
     this.library,
     this.allowArtistRepeats = false,
     this.djStationId,
+    this.genreMix,
   });
 
   /*factory QueueItemSource.fromPlayableItem(
@@ -2231,6 +2232,7 @@ class QueueItemSource {
       library: library,
       allowArtistRepeats: allowArtistRepeats,
       djStationId: djStationId,
+      genreMix: genreMix,
     );
   }
 
@@ -2243,6 +2245,7 @@ class QueueItemSource {
     this.library,
     this.allowArtistRepeats = false,
     this.djStationId,
+    this.genreMix,
   }) : id = id.raw;
 
   @HiveField(0)
@@ -2271,6 +2274,11 @@ class QueueItemSource {
   @HiveField(7)
   final String? djStationId;
 
+  /// For Radio, the name of the genres its songs were picked for ("" for none), so changing Radio's genres later
+  /// doesn't change what queued and saved songs were picked for. Null when not known.
+  @HiveField(8)
+  final String? genreMix;
+
   bool get wantsItem => item == null && RegExp(r'^[0-9a-f]{32}$').matchAsPrefix(id) != null;
 
   @override
@@ -2281,11 +2289,12 @@ class QueueItemSource {
         other.id == id &&
         other.contextNormalizationGain == contextNormalizationGain &&
         other.allowArtistRepeats == allowArtistRepeats &&
-        other.djStationId == djStationId;
+        other.djStationId == djStationId &&
+        other.genreMix == genreMix;
   }
 
   @override
-  int get hashCode => Object.hash(type, name, id, contextNormalizationGain, allowArtistRepeats, djStationId);
+  int get hashCode => Object.hash(type, name, id, contextNormalizationGain, allowArtistRepeats, djStationId, genreMix);
 
   @override
   String toString() => name.toString();

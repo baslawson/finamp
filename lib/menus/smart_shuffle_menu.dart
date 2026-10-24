@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:collection/collection.dart';
 import 'package:finamp/components/fun_heading.dart';
 import 'package:finamp/components/AudioServiceSettingsScreen/shuffle_randomness_slider.dart';
+import 'package:finamp/components/genre_fit_switch.dart';
 import 'package:finamp/components/global_snackbar.dart';
 import 'package:finamp/components/harmonic_mixing_switch.dart';
 import 'package:finamp/components/mix_length_chips.dart';
@@ -11,10 +12,13 @@ import 'package:finamp/models/finamp_models.dart';
 import 'package:finamp/models/jellyfin_models.dart';
 import 'package:finamp/services/ai_dj_service.dart';
 import 'package:finamp/services/ai_service.dart';
+import 'package:finamp/services/analyzer_service.dart';
 import 'package:finamp/services/dj_transition_service.dart';
 import 'package:finamp/services/downloads_service.dart';
 import 'package:finamp/services/finamp_settings_helper.dart';
 import 'package:finamp/services/finamp_user_helper.dart';
+import 'package:finamp/services/genre_fit.dart';
+import 'package:finamp/services/genre_mix.dart';
 import 'package:finamp/services/jellyfin_api_helper.dart';
 import 'package:finamp/services/queue_service.dart';
 import 'package:finamp/services/radio_tuning.dart';
@@ -35,25 +39,12 @@ List<int> get _decades {
   return [for (var decade = currentDecade; decade >= 1950; decade -= 10) decade];
 }
 
-/// A genre choice: either one of the library's genre tags or an AI tidied group of tags.
-typedef _GenreChoice = ({String name, List<BaseItemId> ids});
+typedef _GenreChoice = GenreChoice;
 
 /// The genres to choose from, tidied ones if the AI grouped them before.
-final _smartShuffleGenresProvider = FutureProvider.autoDispose<({List<_GenreChoice> choices, bool tidied})>((
-  ref,
-) async {
+final _smartShuffleGenresProvider = FutureProvider.autoDispose<({List<_GenreChoice> choices, bool tidied})>((ref) {
   ref.watch(finampSettingsProvider.isOffline);
-  final groups = await AiDjService.loadGenreGroups();
-  if (groups != null) {
-    return (choices: [for (final group in groups) (name: group.name, ids: group.genreIds)], tidied: true);
-  }
-  final genres = await AiDjService.loadGenres();
-  return (
-    choices: [
-      for (final genre in genres) (name: genre.name ?? "", ids: [genre.id]),
-    ],
-    tidied: false,
-  );
+  return loadGenreChoices();
 });
 
 Future<void> showSmartShuffleMenu({required BuildContext context}) {
@@ -106,8 +97,8 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
       // Cleaned the way the queue would (duplicates, resting songs, unplayable recordings) before ordering and cutting
       // to length, so the length counts songs that will play and the first song is one that may.
       await ListeningPreferences.ensureLoaded();
-      final tracks = await ServerHealthGuard.filter(
-        withoutDuplicateSongs(await _loadTracks()).where(ListeningPreferences.permits).toList(),
+      final tracks = await _loadTracks(
+        (pool) => ServerHealthGuard.filter(withoutDuplicateSongs(pool).where(ListeningPreferences.permits).toList()),
       );
       if (tracks.isEmpty) {
         GlobalSnackbar.message((context) => context.l10n.smartShuffleNoTracks);
@@ -134,8 +125,12 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
               ? context.l10n.smartShuffleAction
               : "${context.l10n.smartShuffleAction}: $name",
         ),
-        id: "smartShuffle",
+        id: GenreMix.smartShuffleId,
       );
+      // Remembered first, so the song menu can offer "Doesn't fit" as soon as the mix plays.
+      if (_genre != null) {
+        await GenreMix.started(sourceName: source.name.pretranslatedName!, genre: _genre!.name);
+      }
       await GetIt.instance<QueueService>().startPlayback(
         items: prepareSmartShuffle(harmonic ?? tracks, source, minutes: _minutes, harmonic: harmonic != null),
         source: source,
@@ -176,16 +171,71 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
     ref.invalidate(_smartShuffleGenresProvider);
   }
 
-  Future<List<BaseItemDto>> _loadTracks() async {
+  /// The songs to shuffle: [clean]ed of ones that can't play first, so a genre's choice and the length are made from
+  /// songs that will play.
+  Future<List<BaseItemDto>> _loadTracks(Future<List<BaseItemDto>> Function(List<BaseItemDto> pool) clean) async {
     final settings = FinampSettingsHelper.finampSettings;
     final library = GetIt.instance<FinampUserHelper>().currentUser!.currentView!;
     final years = _decade == null ? null : [for (var year = _decade!; year < _decade! + 10; year++) year];
     // Enough to fill the chosen length even when some songs get thinned out or are short.
     final count = max(settings.trackShuffleItemCount, _minutes == null ? 0 : _minutes! ~/ averageTrackMinutes * 2);
+    final genre = _genre;
+    // A genre leaves out songs that don't fit it, so twice as many are fetched to choose from.
+    final fetch = genre == null ? count : min(count * 2, AnalyzerService.genreFitLimit);
+    final fetched = await _fetchTracks(settings, library, genre, years, fetch);
+    if (genre == null) return SkipService.thinOut(await clean(fetched), _id);
+    // Songs the listener said are the genre join in wherever they're tagged, mixed in at random like the rest.
+    final answered = settings.isOffline
+        ? <BaseItemDto>[]
+        : await _answeredSongs(genre, years, library: library, exclude: fetched);
+    final random = Random();
+    final mixed = [...fetched];
+    for (final song in answered) {
+      mixed.insert(random.nextInt(mixed.length + 1), song);
+    }
+    final pool = await clean(mixed);
+    final fitting = await GenreFit.filter(
+      pool,
+      name: genre.name,
+      tags: genre.tags,
+      // Enough left to fill the chosen length.
+      keepAtLeast: _minutes == null ? 10 : (_minutes! / averageTrackMinutes * 1.5).ceil(),
+      keepAtMost: count,
+    );
+    // Often skipped songs come up less.
+    return SkipService.thinOut(fitting, _id);
+  }
 
+  /// Some of the songs the listener said are [genre] (in the chosen decade), apart from the ones already fetched.
+  Future<List<BaseItemDto>> _answeredSongs(
+    _GenreChoice genre,
+    List<int>? years, {
+    required BaseItemDto library,
+    required List<BaseItemDto> exclude,
+  }) async {
+    final known = {for (final track in exclude) track.id.raw};
+    final wanted = (await GenreFit.answeredFits(genre.name)).where((id) => !known.contains(id));
+    // Only the ones in this library, like the rest of the mix.
+    return GenreMix.answeredSongs(
+      GetIt.instance<JellyfinApiHelper>(),
+      wanted,
+      library: library,
+      count: 200,
+      years: years,
+      wait: const Duration(seconds: 10),
+    );
+  }
+
+  Future<List<BaseItemDto>> _fetchTracks(
+    FinampSettings settings,
+    BaseItemDto library,
+    _GenreChoice? genre,
+    List<int>? years,
+    int count,
+  ) async {
     if (settings.isOffline) {
       final downloadsService = GetIt.instance<DownloadsService>();
-      final genreIds = _genre?.ids ?? <BaseItemId?>[null];
+      final genreIds = genre?.ids ?? <BaseItemId?>[null];
       final stubs = [
         for (final genreId in genreIds)
           ...await downloadsService.getAllTracks(
@@ -200,19 +250,18 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
           .where((track) => years == null || years.contains(track.productionYear))
           .toList();
       final unique = {for (final track in tracks) track.id: track}.values.toList();
-      // Often skipped songs come up less.
-      return SkipService.thinOut((unique..shuffle()).take(count).toList(), _id);
+      return (unique..shuffle()).take(count).toList();
     }
 
     final tracks = await GetIt.instance<JellyfinApiHelper>().getItems(
       parentItem: library,
       includeItemTypes: BaseItemDtoType.track.jellyfinName,
-      genreFilters: _genre?.ids,
+      genreFilters: genre?.ids,
       years: years,
       sortBy: "Random",
       limit: count,
     );
-    return SkipService.thinOut(tracks ?? [], _id);
+    return tracks ?? [];
   }
 
   @override
@@ -277,6 +326,8 @@ class _SmartShuffleMenuState extends ConsumerState<_SmartShuffleMenu> {
                           ),
                       ],
                     ),
+                    // Above the genres, which can be a long list.
+                    const GenreFitSwitch(),
                     genres.when(
                       loading: () => const LinearProgressIndicator(),
                       error: (_, _) => Text(context.l10n.errorLoadingItems),

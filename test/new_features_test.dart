@@ -77,6 +77,21 @@ void main() {
     expect(GenreEqService.presetFor([]), GenreEqPreset.flat);
   });
 
+  test("genre EQ goes by a compound genre's last style, and gentle styles get the acoustic sound", () {
+    expect(GenreEqService.presetFor(["Indie Pop"]), GenreEqPreset.pop);
+    expect(GenreEqService.presetFor(["Synthpop"]), GenreEqPreset.pop);
+    expect(GenreEqService.presetFor(["Pop Rock"]), GenreEqPreset.rock);
+    expect(GenreEqService.presetFor(["Alternative R&B"]), GenreEqPreset.hipHop);
+    expect(GenreEqService.presetFor(["Rap Metal"]), GenreEqPreset.metal);
+    expect(GenreEqService.presetFor(["Soft Rock"]), GenreEqPreset.acoustic);
+    expect(GenreEqService.presetFor(["Folk Rock"]), GenreEqPreset.acoustic);
+    expect(GenreEqService.presetFor(["Acoustic Pop"]), GenreEqPreset.acoustic);
+    expect(GenreEqService.presetFor(["Singer-Songwriter"]), GenreEqPreset.acoustic);
+    // A loud style stays loud.
+    expect(GenreEqService.presetFor(["Folk Metal"]), GenreEqPreset.metal);
+    expect(GenreEqService.presetFor(["Folk Punk"]), GenreEqPreset.rock);
+  });
+
   test("EQ curves add up", () {
     final combined = HeadphoneEqService.combine([(100, 2), (1000, 4)], [(100, 1), (1000, -1)]);
     expect(combined, [(100.0, 3.0), (1000.0, 3.0)]);

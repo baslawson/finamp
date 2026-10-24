@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:finamp/menus/play_order_menu.dart';
+import 'package:finamp/menus/components/menuEntries/genre_answers_menu_entry.dart';
 import 'package:finamp/menus/components/menuEntries/listening_choices_menu_entry.dart';
 import 'package:finamp/menus/components/menuEntries/prepare_karaoke_menu_entry.dart';
 
@@ -261,7 +262,9 @@ class _TrackMenuState extends ConsumerState<TrackMenu> with TickerProviderStateM
       ToggleFavoriteMenuEntry(baseItem: widget.item),
       ShareCardMenuEntry(baseItem: widget.item),
       NormalizationDetailsMenuEntry(item: widget.item),
+      DoesntFitGenreMenuEntry(item: widget.item, queueItem: widget.queueItem ?? queueItem),
       ListeningChoicesMenuEntry(item: widget.item),
+      GenreAnswersMenuEntry(item: widget.item),
       if (widget.showQueueActions) CreatePlaylistFromCurrentQueueMenuEntry(),
       if (widget.showQueueActions) ClearQueueMenuEntry(baseItem: widget.item),
       DeleteFromServerMenuEntry(baseItem: widget.item),

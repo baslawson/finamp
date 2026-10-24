@@ -15,7 +15,7 @@ ENV ADVANCED_ANALYSIS=$ADVANCED_ANALYSIS
 COPY entrypoint.sh /entrypoint.sh
 # Copied from Windows, the script can have CRLF line endings, which sh can't run.
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod 755 /entrypoint.sh
-COPY app.py loudness.py structure.py karaoke.py karaoke_proxy.py hub*.py server_*.py ./
+COPY app.py genre_fit.py loudness.py structure.py karaoke.py karaoke_proxy.py hub*.py server_*.py ./
 COPY hub_web ./hub_web
 
 ENV DATA_DIR=/data HF_HOME=/data/huggingface

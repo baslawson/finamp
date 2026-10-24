@@ -212,13 +212,16 @@ void main() {
         name: QueueItemSourceName(type: QueueItemSourceNameType.radio, localizationParameter: 'Evening station'),
         id: 'seed',
         djStationId: 'saved-station',
+        genreMix: 'Pop | Rock',
       );
       await box.put('station', source);
       await box.close();
       final reopened = await Hive.openBox<QueueItemSource>('source');
       expect(reopened.get('station')!.id, 'seed');
       expect(reopened.get('station')!.djStationId, 'saved-station');
+      expect(reopened.get('station')!.genreMix, 'Pop | Rock');
       expect(source.withItem(BaseItemDto(id: const BaseItemId('seed'))).djStationId, 'saved-station');
+      expect(source.withItem(BaseItemDto(id: const BaseItemId('seed'))).genreMix, 'Pop | Rock');
     } finally {
       await Hive.close();
       await directory.delete(recursive: true);

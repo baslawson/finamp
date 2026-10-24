@@ -4,6 +4,8 @@
 !Dockerfile
 !Dockerfile.karaoke
 !entrypoint.sh
+!genre_fit.py
+!test_genre_fit.py
 !app.py
 !hub.py
 !hub_core.py

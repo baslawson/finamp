@@ -240,6 +240,57 @@ class AnalyzerService {
     return [for (final result in (_json(response) as List).cast<Map<String, dynamic>>()) result["id"] as String];
   }
 
+  /// The most songs one genre check compares at once (the analyzer's limit).
+  static const genreFitLimit = 5000;
+
+  /// How much each of [ids] sounds like [genre] compared with the rest of them (above 0 fits better than most), and
+  /// what the listener said about any of them. [main] are the songs whose main tag is the genre, which the genre's
+  /// sound is taken from. Songs the analyzer hasn't heard get no score, and none do when too few have been.
+  static Future<({Map<String, double> scores, Map<String, bool> labels})> genreFit(
+    String genre,
+    List<String> ids, {
+    Set<String> main = const {},
+  }) async {
+    final batch = ids.take(genreFitLimit).toList();
+    final response = await _send(
+      "POST",
+      "/genre-fit",
+      body: {"genre": genre, "ids": batch, "main": batch.where(main.contains).toList()},
+      // The first check loads the model, which can take a while.
+      timeout: const Duration(seconds: 20),
+    );
+    final json = _json(response) as Map<String, dynamic>;
+    return (
+      scores: {
+        for (final MapEntry(:key, :value) in (json["scores"] as Map<String, dynamic>? ?? {}).entries)
+          key: (value as num).toDouble(),
+      },
+      labels: _labels(json["labels"]),
+    );
+  }
+
+  /// Remembers that the song [id] is (or with [fits] false, isn't) [genre], or forgets it when [fits] is null.
+  static Future<void> setGenreLabel(String id, String genre, bool? fits) => _send(
+    "POST",
+    "/genre-labels",
+    body: {"id": id, "genre": genre, "fits": fits},
+    timeout: const Duration(seconds: 10),
+  );
+
+  /// What the listener said about the song [id], by lower-case genre name.
+  static Future<Map<String, bool>> genreLabelsOfSong(String id) async =>
+      _labels(_json(await _send("GET", "/genre-labels", query: {"id": id}, timeout: const Duration(seconds: 10))));
+
+  /// What the listener said about songs for [genre], by song id.
+  static Future<Map<String, bool>> genreLabelsOfGenre(String genre) async => _labels(
+    _json(await _send("GET", "/genre-labels", query: {"genre": genre}, timeout: const Duration(seconds: 10))),
+  );
+
+  static Map<String, bool> _labels(dynamic json) => {
+    for (final MapEntry(:key, :value) in (json as Map<String, dynamic>? ?? {}).entries)
+      if (value is bool) key: value,
+  };
+
   /// A check-up of the library: files that can't be played or are cut off, songs with long silent endings or hidden
   /// tracks, the same recording on several albums, and missing tags.
   static Future<LibraryHealth> health() async {

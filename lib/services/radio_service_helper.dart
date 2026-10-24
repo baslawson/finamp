@@ -18,6 +18,7 @@ import 'package:finamp/services/jellyfin_api_helper.dart';
 import 'package:finamp/services/music_player_background_task.dart';
 import 'package:finamp/services/queue_service.dart';
 import 'package:finamp/services/radio_tuning.dart';
+import 'package:finamp/services/genre_mix.dart';
 import 'package:finamp/services/radio_queue.dart';
 import 'package:finamp/services/radio_preferences.dart';
 import 'package:finamp/services/song_duplicates.dart';
@@ -156,6 +157,7 @@ Future<void> maybeAddRadioTracks() async {
               library: queue.source.library,
               allowArtistRepeats: allowRepeats,
               djStationId: queue.source.djStationId,
+              genreMix: GenreMix.radioGenreMix(preferences),
             ),
             shuffleState: SliceShuffleState.preShuffled,
           ),
@@ -302,6 +304,7 @@ Future<void> startRadioPlaybackWithTracks(
   );
   _radioCacheStateStream.add(localResult);
 
+  final preferences = await RadioPreferencesStore.load();
   final radioSource = QueueItemSource(
     type: QueueItemSourceType.radio,
     name: QueueItemSourceName(
@@ -313,6 +316,7 @@ Future<void> startRadioPlaybackWithTracks(
     library: GetIt.instance<FinampUserHelper>().currentUser?.currentViewId,
     allowArtistRepeats: allowRepeats,
     djStationId: stationId,
+    genreMix: GenreMix.radioGenreMix(preferences),
   );
 
   try {

@@ -296,6 +296,110 @@ class ApplicationTests(unittest.TestCase):
         self.assertNotIn('secret', record.getMessage())
 
 
+class GenreFitTests(unittest.TestCase):
+    def setUp(self):
+        import app
+        import numpy as np
+        self.app, self.np = app, np
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        with patch.object(app, 'DATA_DIR', folder.name):
+            self.database = app.db()
+        self.addCleanup(self.database.close)
+        loud, ballad, self.folk = np.eye(3, dtype=np.float32)
+        rng = np.random.default_rng(1)
+        def near(direction):
+            vector = direction + rng.normal(0, 0.1, 3).astype(np.float32)
+            return vector / np.linalg.norm(vector)
+        self.ids = [f'rock{i}' for i in range(10)] + ['ballad0', 'ballad1']
+        embeddings = np.stack([near(loud) for _ in range(10)] + [near(ballad), near(ballad)])
+        index = Mock(lock=threading.Lock(), ids=self.ids, embeddings=embeddings,
+                     positions={track_id: i for i, track_id in enumerate(self.ids)})
+        texts = {'Rock music': loud, 'a soft ballad with piano and gentle vocals': ballad}
+        for patcher in (
+            patch.multiple(app, INDEX=index, ADVANCED_ANALYSIS=True, DB=self.database),
+            patch.object(app, 'cached_text_embedding', side_effect=lambda text: texts.get(text, self.folk)),
+        ):
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_scores_the_analysed_songs_and_marks_ballads_down(self):
+        app = self.app
+        result = app.genre_fit(app.GenreFitRequest(
+            genre='Rock', ids=[*(f'rock{i}' for i in range(10)), 'ballad-0', 'ballad1', 'unknown'],
+            main=[f'rock{i}' for i in range(10)],
+        ))
+        scores = result['scores']
+        self.assertEqual(set(scores), set(self.ids))
+        self.assertLess(max(scores['ballad0'], scores['ballad1']), min(scores[f'rock{i}'] for i in range(10)))
+        # Too few analysed songs to compare, or no genre: nothing is scored.
+        self.assertEqual(app.genre_fit(app.GenreFitRequest(genre='Rock', ids=self.ids[:3]))['scores'], {})
+        self.assertEqual(app.genre_fit(app.GenreFitRequest(genre=' ', ids=self.ids))['scores'], {})
+        # Without AI analysis nothing is scored, but nothing fails either.
+        with patch.object(app, 'ADVANCED_ANALYSIS', False):
+            self.assertEqual(app.genre_fit(app.GenreFitRequest(genre='Rock', ids=self.ids)), {'scores': {}, 'labels': {}})
+
+    def test_answers_are_kept_by_genre_and_returned_with_the_scores(self):
+        app = self.app
+        app.set_genre_label(app.GenreLabelRequest(id='rock-3', genre='Rock', fits=False))
+        app.set_genre_label(app.GenreLabelRequest(id='ballad0', genre=' ROCK ', fits=True))
+        app.set_genre_label(app.GenreLabelRequest(id='ballad0', genre='Soft Rock', fits=True))
+        self.assertEqual(app.genre_labels(id='ballad0'), {'rock': True, 'soft rock': True})
+        self.assertEqual(app.genre_labels(genre='rock'), {'rock3': False, 'ballad0': True})
+        # Changing and forgetting an answer.
+        app.set_genre_label(app.GenreLabelRequest(id='ballad0', genre='Rock', fits=False))
+        app.set_genre_label(app.GenreLabelRequest(id='ballad0', genre='Soft Rock'))
+        self.assertEqual(app.genre_labels(id='ballad0'), {'rock': False})
+        result = app.genre_fit(app.GenreFitRequest(genre='Rock', ids=self.ids, main=self.ids[:10]))
+        self.assertEqual(result['labels'], {'rock3': False, 'ballad0': False})
+        # The answers come back even without AI analysis to check the sound.
+        with patch.object(app, 'ADVANCED_ANALYSIS', False):
+            self.assertEqual(
+                app.genre_fit(app.GenreFitRequest(genre='Rock', ids=self.ids)),
+                {'scores': {}, 'labels': {'rock3': False, 'ballad0': False}},
+            )
+        with self.assertRaises(HTTPException):
+            app.set_genre_label(app.GenreLabelRequest(id='', genre='Rock', fits=True))
+        with self.assertRaises(HTTPException):
+            app.genre_labels()
+
+    def test_answers_for_different_genre_picks_are_kept_apart(self):
+        app = self.app
+        # Radio names its picks with " | ", which Jellyfin genre names can't contain, so these never mix.
+        app.set_genre_label(app.GenreLabelRequest(id='rock3', genre='Country and Western | Rock', fits=False))
+        app.set_genre_label(app.GenreLabelRequest(id='rock3', genre='Country | Rock | Western', fits=True))
+        app.set_genre_label(app.GenreLabelRequest(id='rock3', genre='Country | Rock | Western'))
+        self.assertEqual(app.genre_labels(genre='country and western | rock'), {'rock3': False})
+        self.assertEqual(app.genre_labels(genre='Country | Rock | Western'), {})
+        # Long names that start the same stay apart too.
+        start = ' | '.join(f'genre {i}' for i in range(30))
+        app.set_genre_label(app.GenreLabelRequest(id='rock3', genre=f'{start} | blues', fits=False))
+        app.set_genre_label(app.GenreLabelRequest(id='rock3', genre=f'{start} | jazz', fits=True))
+        self.assertEqual(app.genre_labels(genre=f'{start} | blues'), {'rock3': False})
+        self.assertEqual(app.genre_labels(genre=f'{start} | jazz'), {'rock3': True})
+        self.assertEqual(app.genre_key(' Pop   Rock '), 'pop rock')
+        # Only A to Z are lowered, as the app does.
+        self.assertEqual(app.genre_key('İNDIE  Rock'), 'İndie rock')
+        # A long name's key, as the genre editor reads it back, changes and clears the same answer.
+        (key,) = app.genre_labels(id='rock3').keys() - {'country and western | rock', app.genre_key(f'{start} | jazz')}
+        self.assertEqual(app.genre_key(key), key)
+        app.set_genre_label(app.GenreLabelRequest(id='rock3', genre=key, fits=True))
+        self.assertEqual(app.genre_labels(genre=f'{start} | blues'), {'rock3': True})
+        app.set_genre_label(app.GenreLabelRequest(id='rock3', genre=key))
+        self.assertEqual(app.genre_labels(genre=f'{start} | blues'), {})
+        self.assertEqual(len(app.genre_labels(id='rock3')), 2)
+
+    def test_answers_teach_the_genre_sound(self):
+        app = self.app
+        request = app.GenreFitRequest(genre='Ambient Rock', ids=self.ids, main=self.ids)
+        before = app.genre_fit(request)['scores']
+        # The listener says the ballads are the genre and three rockers aren't.
+        for track_id, fits in [('ballad0', True), ('ballad1', True), ('rock0', False), ('rock1', False), ('rock2', False)]:
+            app.set_genre_label(app.GenreLabelRequest(id=track_id, genre='Ambient Rock', fits=fits))
+        after = app.genre_fit(request)['scores']
+        self.assertGreater(after['ballad0'] - after['rock5'], before['ballad0'] - before['rock5'])
+
+
 class HealthCacheTests(unittest.TestCase):
     def test_duplicate_cache_tracks_content_changes_while_health_stays_fresh(self):
         import app

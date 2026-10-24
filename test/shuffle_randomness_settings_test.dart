@@ -113,27 +113,27 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
-    expect(find.text('Randomness: 50%'), findsNWidgets(2));
+    expect(find.text('50%'), findsNWidgets(2));
     final slider = tester.widget<Slider>(find.byType(Slider).first);
     await tester.runAsync(() async {
       slider.onChanged!(73);
       await Hive.box<FinampSettings>('FinampSettings').flush();
     });
     await tester.pumpAndSettle();
-    expect(find.text('Randomness: 73%'), findsNWidgets(2));
+    expect(find.text('73%'), findsNWidgets(2));
     expect(FinampSettingsHelper.finampSettings.shuffleRandomness, 73);
     await tester.runAsync(() async {
       slider.onChanged!(0);
       await Hive.box<FinampSettings>('FinampSettings').flush();
     });
     await tester.pumpAndSettle();
-    expect(find.text('Randomness: 0%'), findsNWidgets(2));
+    expect(find.text('0%'), findsNWidgets(2));
     await tester.runAsync(() async {
       slider.onChanged!(100);
       await Hive.box<FinampSettings>('FinampSettings').flush();
     });
     await tester.pumpAndSettle();
-    expect(find.text('Randomness: 100%'), findsNWidgets(2));
+    expect(find.text('100%'), findsNWidgets(2));
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox());
   });

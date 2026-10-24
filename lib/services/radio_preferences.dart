@@ -4,6 +4,8 @@ import 'dart:math';
 import 'package:crypto/crypto.dart';
 import 'package:finamp/models/finamp_models.dart';
 import 'package:finamp/models/jellyfin_models.dart';
+import 'package:finamp/services/genre_fit.dart';
+import 'package:finamp/services/genre_mix.dart';
 import 'package:finamp/services/analyzer_service.dart';
 import 'package:finamp/services/artist_spacing.dart';
 import 'package:finamp/services/listening_preferences.dart';
@@ -46,7 +48,13 @@ class RadioPreferences {
       ListeningPreferences.permits(item) &&
       !excludedArtists.contains(ArtistSpacing.artistKey(item)) &&
       (genres.isEmpty ||
-          (item.genres ?? []).any((g) => genres.any((selected) => selected.toLowerCase() == g.toLowerCase())));
+          (item.genres ?? []).any((g) => genres.any((selected) => selected.toLowerCase() == g.toLowerCase())) ||
+          // Songs the listener said are the picked genres count, whatever their tags.
+          GenreFit.saidToBe(_genreName, item.id.raw));
+
+  /// The name Radio's picked genres are answered under, worked out once per [genres].
+  static final _genreNames = Expando<String>();
+  String get _genreName => _genreNames[genres] ??= GenreMix.radioGenreName(genres);
 
   Future<List<BaseItemId>> genreIds(JellyfinApiHelper api, BaseItemDto? library) async {
     if (genres.isEmpty) return [];
@@ -69,7 +77,8 @@ class RadioPreferences {
   }) async {
     final ids = await genreIds(api, library);
     if (ids.isEmpty) return [];
-    return await api
+    final tagged =
+        await api
             .getItems(
               parentItem: library,
               includeItemTypes: 'Audio',
@@ -81,6 +90,23 @@ class RadioPreferences {
             )
             .timeout(const Duration(seconds: 4)) ??
         [];
+    return [...tagged, ...await answeredSongs(api, library: library, exclude: tagged, favoritesOnly: favoritesOnly)];
+  }
+
+  /// A few of the songs in [library] (only favourites with [favoritesOnly]) the listener said are the picked genres,
+  /// though their tags may not say so.
+  Future<List<BaseItemDto>> answeredSongs(
+    JellyfinApiHelper api, {
+    required BaseItemDto library,
+    List<BaseItemDto> exclude = const [],
+    bool favoritesOnly = false,
+  }) async {
+    final known = {for (final item in exclude) item.id.raw};
+    final wanted = (await GenreFit.answeredFits(
+      GenreMix.radioGenreName(genres),
+    )).where((id) => !known.contains(id)).toList();
+    if (wanted.isEmpty) return [];
+    return GenreMix.answeredSongs(api, wanted, library: library, count: 25, favoritesOnly: favoritesOnly);
   }
 
   /// Target the unheard share within the available pool, without losing surplus matches.
@@ -127,6 +153,20 @@ class RadioPreferences {
   }
 
   Future<List<BaseItemDto>> rank(List<BaseItemDto> pool, int needed, {bool album = false}) async {
+    if (genres.isNotEmpty && !album) {
+      final name = GenreMix.radioGenreName(genres);
+      // The songs said to be the genres are looked up first, so [permits] lets them in whatever their tags, in every
+      // Radio mode and after a restart.
+      await GenreFit.answeredFits(name);
+      // Picked genres keep to songs that sound like them, not just ones tagged with them on the side.
+      pool = await GenreFit.filter(
+        pool.where(permits).toList(),
+        name: name,
+        tags: genres.toSet(),
+        keepAtLeast: needed,
+        wait: const Duration(seconds: 5),
+      );
+    }
     Map<String, TrackAnalysis> analysis = const {};
     if (energy != 0 && !album) {
       try {

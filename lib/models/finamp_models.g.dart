@@ -1072,13 +1072,14 @@ class QueueItemSourceAdapter extends TypeAdapter<QueueItemSource> {
       library: fields[5] as BaseItemId?,
       allowArtistRepeats: fields[6] as bool? ?? false,
       djStationId: fields[7] as String?,
+      genreMix: fields[8] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, QueueItemSource obj) {
     writer
-      ..writeByte(7)
+      ..writeByte(8)
       ..writeByte(0)
       ..write(obj.type)
       ..writeByte(1)
@@ -1092,7 +1093,9 @@ class QueueItemSourceAdapter extends TypeAdapter<QueueItemSource> {
       ..writeByte(6)
       ..write(obj.allowArtistRepeats)
       ..writeByte(7)
-      ..write(obj.djStationId);
+      ..write(obj.djStationId)
+      ..writeByte(8)
+      ..write(obj.genreMix);
   }
 
   @override

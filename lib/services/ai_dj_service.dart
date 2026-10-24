@@ -203,6 +203,8 @@ These are the genre tags of a music library. Many are duplicates, typos, other l
 
 Group them into a clean, consistent set of genres a listener would expect (for example "Progressive Rock", "Alternative", "Hip-Hop"). Use English, Title Case names. Put every tag into exactly one group: for a combined tag like "Pop / Rock", pick its most specific main genre. Prefer fewer, meaningful groups over many tiny ones, but keep clearly different styles apart.
 
+Group by how the music sounds, so someone who picks a group hears what they expect. Softer or acoustic styles never go into a harder parent genre: keep "Soft Rock", "Folk Rock", "Acoustic", "Singer-Songwriter", "Ballads" and similar in their own groups (or with each other), not in "Rock" or "Metal". Likewise keep "Pop / Rock" and "Adult Contemporary" out of "Rock".
+
 Tags (number|tag):
 ${[for (final (index, genre) in genres.indexed) "$index|${genre.name}"].join("\n")}''';
 

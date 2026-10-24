@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:finamp/components/genre_fit_switch.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/models/finamp_models.dart';
 import 'package:finamp/models/jellyfin_models.dart';
@@ -259,6 +260,7 @@ class _RadioControlsScreenState extends State<RadioControlsScreen> {
                           ),
                       ],
                     ),
+                    const GenreFitSwitch(),
                   ],
                 ),
                 const SizedBox(height: 12),

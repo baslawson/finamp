@@ -204,7 +204,17 @@ class JellyfinApiHelper {
       List<BaseItemDto> output = [];
       // Limit itemIds per request to 200.  Execute up to 10 requests in parallel.
       for (final slice in itemIds!.slices(2000)) {
-        final futures = slice.slices(200).map((subSlice) => _fetchGetItemsResponse(itemIds: subSlice, fields: fields));
+        // Ids within a parent stay within it.
+        final futures = slice
+            .slices(200)
+            .map(
+              (subSlice) => _fetchGetItemsResponse(
+                parentItem: parentItem,
+                recursive: parentItem == null ? null : recursive,
+                itemIds: subSlice,
+                fields: fields,
+              ),
+            );
         final results = await Future.wait(futures);
         for (var subSliceResult in results) {
           output.addAll(subSliceResult.items ?? []);
@@ -307,7 +317,13 @@ class JellyfinApiHelper {
   }) async {
     final currentUserId = _finampUserHelper.currentUser!.id;
     assert(_verifyCallable());
-    assert(itemIds == null || parentItem == null);
+    // Ids within a parent are the ones of those found under it (a playlist's songs come in its own order instead).
+    assert(itemIds == null || parentItem == null || parentItem.type != "Playlist");
+    if (itemIds != null && itemIds.isEmpty) {
+      // An empty itemIds list will not apply a filter to the results, but
+      // it should actually return no results
+      return QueryResult_BaseItemDto(totalRecordCount: 0, startIndex: 0, items: []);
+    }
     fields ??=
         defaultFields; // explicitly set the default fields, if we pass `null` to [JellyfinAPI.getItems] it will **not** apply the default fields, since the argument *is* provided.
     recursive ??= true;
@@ -316,11 +332,6 @@ class JellyfinApiHelper {
       _jellyfinApiHelperLogger.fine("Getting children of ${parentItem.name}");
     } else if (itemIds != null) {
       _jellyfinApiHelperLogger.fine("Getting items with ids $itemIds");
-      if (itemIds.isEmpty) {
-        // An empty itemIds list will not apply a filter to the results, but
-        // it should actually return no results
-        return QueryResult_BaseItemDto(totalRecordCount: 0, startIndex: 0, items: []);
-      }
     } else {
       _jellyfinApiHelperLogger.fine("Getting up to $limit items of type $includeItemTypes.");
     }

@@ -6,6 +6,7 @@ Runs next to Jellyfin, reads the music files directly and provides:
   * song recognition: identify a short recording against the library (Chromaprint)
 """
 
+import functools
 import gc
 import hashlib
 import hmac
@@ -14,6 +15,7 @@ import logging
 import os
 import re
 import sqlite3
+import string
 import subprocess
 import tempfile
 import threading
@@ -26,6 +28,7 @@ import requests
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
+import genre_fit as genre_fit_scoring
 from loudness import LoudnessIndex
 import structure
 from hub import Hub, create_app as create_hub_app
@@ -107,6 +110,13 @@ def db() -> sqlite3.Connection:
     for column, kind in STRUCTURE_COLUMNS.items():
         if column not in existing:
             connection.execute(f"ALTER TABLE tracks ADD COLUMN {column} {kind}")
+    # What the listener said a song's genre is or isn't, by lower-case genre name; genre mixes learn from it.
+    connection.execute(
+        """CREATE TABLE IF NOT EXISTS genre_labels (
+            id TEXT NOT NULL, genre TEXT NOT NULL, fits INTEGER NOT NULL, at REAL NOT NULL,
+            PRIMARY KEY (id, genre))"""
+    )
+    connection.execute("CREATE INDEX IF NOT EXISTS genre_labels_by_genre ON genre_labels(genre)")
     connection.commit()
     return connection
 
@@ -318,6 +328,8 @@ class Index:
     def __init__(self):
         self.lock = threading.Lock()
         self.ids: list[str] = []
+        # Where each id is in [ids] and [embeddings].
+        self.positions: dict[str, int] = {}
         self.embeddings = np.zeros((0, 512), dtype=np.float32)
         self.fingerprints: list[tuple[str, np.ndarray]] = []
         self.intensity: dict[str, float] = {}
@@ -350,6 +362,7 @@ class Index:
             self.revision = digest.digest()
             self.intensity = intensity
             self.ids = [row[0] for row in rows]
+            self.positions = {track_id: i for i, track_id in enumerate(self.ids)}
             self.embeddings = (
                 np.stack([np.frombuffer(row[1], dtype=np.float32) for row in rows])
                 if rows
@@ -624,12 +637,126 @@ def similar(id: str, limit: int = 50):
         raise HTTPException(status_code=503, detail="AI analysis is not enabled on this analyzer")
     track_id = id.replace("-", "")
     with INDEX.lock:
-        if track_id not in INDEX.ids:
+        position = INDEX.positions.get(track_id)
+        if position is None:
             raise HTTPException(status_code=404, detail="That track hasn't been analyzed yet")
         ids = INDEX.ids
-        scores = INDEX.embeddings @ INDEX.embeddings[ids.index(track_id)]
+        scores = INDEX.embeddings @ INDEX.embeddings[position]
     best = [i for i in np.argsort(-scores) if ids[i] != track_id][: max(1, min(limit, 500))]
     return [{"id": ids[i], "score": round(float(scores[i]), 4)} for i in best]
+
+
+class GenreFitRequest(BaseModel):
+    genre: str
+    ids: list[str]
+    # The songs whose main (first) tag is the genre; the genre's own sound comes from them.
+    main: list[str] = []
+
+
+class GenreLabelRequest(BaseModel):
+    id: str
+    genre: str
+    # Whether the song is the genre; None forgets the answer.
+    fits: bool | None = None
+
+
+@functools.lru_cache(maxsize=128)
+def cached_text_embedding(text: str) -> np.ndarray:
+    """The same descriptions come up for every genre mix, so they're worked out once."""
+    return text_embedding(text)
+
+
+GENRE_KEY_LENGTH = 215
+ASCII_LOWER = str.maketrans(string.ascii_uppercase, string.ascii_lowercase)
+
+
+def genre_key(genre: str) -> str:
+    """Answers are kept by lower-case genre name, so "Rock" and "rock" are the same genre. A long name (as for many of
+    Radio's genres together) is shortened with a hash of the whole, so different names never share answers. A key
+    comes back as itself, so one read back (as the genre editor does) changes the same answers. Only A to Z are
+    lowered and only ASCII spaces count, as the app does the same and other letters lower differently there."""
+    key = " ".join(word for word in re.split(r"[ \t\n\r\f\v]+", genre) if word).translate(ASCII_LOWER)
+    if len(key) <= GENRE_KEY_LENGTH:
+        return key
+    return f"{key[:GENRE_KEY_LENGTH - 65]}#{hashlib.sha256(key.encode()).hexdigest()}"
+
+
+def genre_labels_for(genre: str) -> dict[str, bool]:
+    """Every song the listener said is or isn't [genre]."""
+    with _db_lock:
+        rows = DB.execute("SELECT id, fits FROM genre_labels WHERE genre = ?", (genre_key(genre),)).fetchall()
+    return {row[0]: bool(row[1]) for row in rows}
+
+
+@app.post("/genre-labels", dependencies=[Depends(authorize)])
+def set_genre_label(request: GenreLabelRequest):
+    """Remembers that a song is or isn't a genre (or forgets it), for genre mixes to learn from."""
+    track_id, genre = request.id.replace("-", "")[:64], genre_key(request.genre)
+    if not track_id or not genre:
+        raise HTTPException(status_code=400, detail="A song and a genre are needed")
+    with _db_lock:
+        if request.fits is None:
+            DB.execute("DELETE FROM genre_labels WHERE id = ? AND genre = ?", (track_id, genre))
+        else:
+            DB.execute(
+                "INSERT INTO genre_labels(id, genre, fits, at) VALUES(?, ?, ?, ?)"
+                " ON CONFLICT(id, genre) DO UPDATE SET fits = excluded.fits, at = excluded.at",
+                (track_id, genre, int(request.fits), time.time()),
+            )
+        DB.commit()
+    return {"ok": True}
+
+
+@app.get("/genre-labels", dependencies=[Depends(authorize)])
+def genre_labels(id: str = "", genre: str = ""):
+    """The listener's answers: by genre for a song ([id]), or by song for a [genre]."""
+    if id:
+        with _db_lock:
+            rows = DB.execute("SELECT genre, fits FROM genre_labels WHERE id = ?", (id.replace("-", "")[:64],)).fetchall()
+        return {row[0]: bool(row[1]) for row in rows}
+    if genre:
+        return genre_labels_for(genre)
+    raise HTTPException(status_code=400, detail="A song or a genre is needed")
+
+
+@app.post("/genre-fit", dependencies=[Depends(authorize)])
+def genre_fit(request: GenreFitRequest):
+    """How much each of [ids] sounds like [genre], relative to the others (see genre_fit.py), and the listener's
+    answers for any of them. Songs that aren't analysed get no score, and none do when too few are analysed."""
+    genre = request.genre.strip()
+    wanted = list(dict.fromkeys(track_id.replace("-", "") for track_id in request.ids[:5000]))
+    if not genre or not wanted:
+        return {"scores": {}, "labels": {}}
+    labels = genre_labels_for(genre)
+    answered = {track_id: labels[track_id] for track_id in wanted if track_id in labels}
+    # Without AI analysis there's no sound to check, but the listener's answers still stand.
+    if not ADVANCED_ANALYSIS:
+        return {"scores": {}, "labels": answered}
+    main = {track_id.replace("-", "") for track_id in request.main[:5000]}
+    with INDEX.lock:
+        positions = INDEX.positions
+        found = [track_id for track_id in wanted if track_id in positions]
+        embeddings = INDEX.embeddings[[positions[track_id] for track_id in found]] if found else None
+        # Answers about any song in the library teach the genre's sound, not just ones in this pool.
+        fits, misfits = (
+            INDEX.embeddings[[positions[track_id] for track_id, fit in labels.items() if fit is side and track_id in positions]]
+            for side in (True, False)
+        )
+    if embeddings is None or len(found) < genre_fit_scoring.MINIMUM_POOL:
+        return {"scores": {}, "labels": answered}
+    contrasts = genre_fit_scoring.contrasts_for(genre)
+    result = genre_fit_scoring.scores(
+        embeddings,
+        np.array([track_id in main for track_id in found]),
+        # Radio's genres together read as "Pop and Rock", and only the start of a long name goes into the description.
+        cached_text_embedding(genre_fit_scoring.genre_prompt(genre.replace(" | ", " and ")[:100])),
+        np.stack([cached_text_embedding(text) for text in contrasts]) if contrasts else np.zeros((0, 512)),
+        fits,
+        misfits,
+    )
+    if result is None:
+        return {"scores": {}, "labels": answered}
+    return {"scores": {track_id: round(float(score), 3) for track_id, score in zip(found, result)}, "labels": answered}
 
 
 @app.get("/health", dependencies=[Depends(authorize)])
