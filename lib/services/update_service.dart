@@ -137,6 +137,11 @@ class UpdateService {
   static Duration installResultWait = const Duration(minutes: 3);
   @visibleForTesting
   static Duration responseWait = const Duration(seconds: 30);
+  /// How often a dropped download resumes before it fails, waiting a little longer each time.
+  @visibleForTesting
+  static int downloadRetries = 3;
+  @visibleForTesting
+  static Duration retryWait = const Duration(seconds: 5);
 
   static bool _started = false;
   static Future<void>? _running;
@@ -350,8 +355,9 @@ class UpdateService {
     return universal ?? arm64;
   }
 
-  /// Downloads the release's APK for this phone and checks it against GitHub's checksum.
-  static Future<File?> download(UpdateRelease release) async {
+  /// Downloads the release's APK for this phone and checks it against GitHub's checksum. An [automatic] download
+  /// is on Wi-Fi only, so it doesn't resume once the phone has moved to mobile data.
+  static Future<File?> download(UpdateRelease release, {bool automatic = false}) async {
     if (_busy) return null;
     // Claimed before anything is awaited, so a second download can't start meanwhile.
     state.value = UpdateState(UpdateStage.downloading, release: release);
@@ -366,23 +372,50 @@ class UpdateService {
       await dir.create(recursive: true);
       final file = File("${dir.path}/${asset.name}");
       part = File("${file.path}.part");
-      // A server that never answers ends the download instead of leaving it waiting.
-      final response = await web.send(http.Request("GET", Uri.parse(asset.url))).timeout(responseWait);
-      if (response.statusCode != 200) throw HttpException("GitHub answered ${response.statusCode}");
       // Written chunk by chunk and awaited, so a full or unwritable disk fails here instead of escaping later.
       final out = await part.open(mode: FileMode.write);
-      final digest = _DigestSink();
-      final hasher = sha256.startChunkedConversion(digest);
+      var digest = _DigestSink();
+      var hasher = sha256.startChunkedConversion(digest);
       var received = 0, shown = 0;
       try {
-        await for (final chunk in response.stream.timeout(const Duration(seconds: 60))) {
-          await out.writeFrom(chunk);
-          hasher.add(chunk);
-          received += chunk.length;
-          // About every 1 %, not every chunk.
-          if (received - shown > asset.size ~/ 100) {
-            shown = received;
-            state.value = UpdateState(UpdateStage.downloading, release: release, received: received, total: asset.size);
+        // A dropped connection carries on from where it stopped, a few times, instead of failing the update.
+        for (var attempt = 0; ; attempt++) {
+          try {
+            final request = http.Request("GET", Uri.parse(asset.url));
+            if (received > 0) request.headers["Range"] = "bytes=$received-";
+            // A server that never answers ends the download instead of leaving it waiting.
+            final response = await web.send(request).timeout(responseWait);
+            if (received > 0 && response.statusCode == 200) {
+              // The whole file again rather than the rest: start over.
+              hasher.close();
+              digest = _DigestSink();
+              hasher = sha256.startChunkedConversion(digest);
+              await out.setPosition(0);
+              await out.truncate(0);
+              received = shown = 0;
+            } else if (response.statusCode != (received > 0 ? 206 : 200)) {
+              throw _GiveUp(HttpException("GitHub answered ${response.statusCode}"));
+            }
+            await for (final chunk in response.stream.timeout(const Duration(seconds: 60))) {
+              await out.writeFrom(chunk);
+              hasher.add(chunk);
+              received += chunk.length;
+              // About every 1 %, not every chunk.
+              if (received - shown > asset.size ~/ 100) {
+                shown = received;
+                state.value = UpdateState(UpdateStage.downloading, release: release, received: received, total: asset.size);
+              }
+            }
+            if (received >= asset.size) break;
+            throw HttpException("The download stopped at $received of ${asset.size} bytes");
+          } on _GiveUp catch (e) {
+            throw e.error;
+          } catch (e) {
+            if (attempt >= downloadRetries || e is FileSystemException) rethrow;
+            _logger.info("Update download interrupted at $received of ${asset.size} bytes, resuming: $e");
+            await Future<void>.delayed(retryWait * (attempt + 1));
+            // Checked right before resuming: the phone may have moved to mobile data while it waited.
+            if (automatic && !await unmetered()) rethrow;
           }
         }
       } finally {
@@ -485,7 +518,7 @@ class UpdateService {
     final canInstall = (await info())["canInstall"] == true;
     if (chosen == UpdateMode.notify || !canInstall || !await unmetered()) return _offer(release);
     // Downloaded at an earlier check (and not installed yet): not again.
-    final file = await _downloaded(release) ?? await download(release);
+    final file = await _downloaded(release) ?? await download(release, automatic: true);
     if (file == null) return;
     // The version may have been skipped during the download, or the mode changed.
     if (!await _mayInstallAutomatically(release)) {
@@ -545,6 +578,13 @@ class UpdateService {
     if (match == null) return null;
     return [for (var group = 1; group <= 3; group++) int.parse(match.group(group)!)];
   }
+}
+
+/// An answer that retrying won't change.
+class _GiveUp implements Exception {
+  const _GiveUp(this.error);
+
+  final Object error;
 }
 
 class _DigestSink implements Sink<Digest> {

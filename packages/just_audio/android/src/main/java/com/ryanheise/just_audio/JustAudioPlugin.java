@@ -15,6 +15,14 @@ import io.flutter.plugin.common.MethodChannel.Result;
  * JustAudioPlugin
  */
 public class JustAudioPlugin implements FlutterPlugin {
+    /** Adds the app's own channels to an engine; called for every engine, with or without an activity. */
+    public interface EngineHook {
+        void onAttached(Context context, BinaryMessenger messenger);
+    }
+
+    /** Set by the app before any engine starts. */
+    public static volatile EngineHook engineHook;
+
     private MethodChannel channel;
     private MainMethodCallHandler methodCallHandler;
 
@@ -22,6 +30,8 @@ public class JustAudioPlugin implements FlutterPlugin {
     public void onAttachedToEngine(@NonNull FlutterPluginBinding binding) {
         Context applicationContext = binding.getApplicationContext();
         BinaryMessenger messenger = binding.getBinaryMessenger();
+        EngineHook hook = engineHook;
+        if (hook != null) hook.onAttached(applicationContext, messenger);
         methodCallHandler = new MainMethodCallHandler(applicationContext, messenger);
 
         channel = new MethodChannel(messenger, "com.ryanheise.just_audio.methods");

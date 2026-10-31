@@ -76,6 +76,7 @@ void main() {
     UpdateService.reset();
     UpdateService.android = true;
     UpdateService.installResultWait = const Duration(seconds: 2);
+    UpdateService.retryWait = Duration.zero;
     UpdateService.folder = () async => dir;
     UpdateService.installedVersion = () async => "1.6.71";
     UpdateService.playing = () => isPlaying;
@@ -191,6 +192,79 @@ void main() {
     expect(file, isNull);
     expect(UpdateService.state.value.stage, UpdateStage.failed);
     expect(dir.listSync(), isEmpty);
+  });
+
+  // Sends [bytes], then drops the connection the way a phone losing signal does.
+  Stream<List<int>> dropped(List<int> bytes) async* {
+    yield bytes;
+    throw http.ClientException("Connection closed while receiving data");
+  }
+
+  test("a dropped download carries on from where it stopped", () async {
+    final ranges = <String?>[];
+    UpdateService.client = () => MockClient.streaming((request, body) async {
+      if (request.url.host == "api.github.com") return http.StreamedResponse(Stream.value(utf8.encode(jsonEncode(release()))), 200);
+      ranges.add(request.headers["Range"]);
+      return ranges.length == 1
+          ? http.StreamedResponse(dropped(apk.sublist(0, 9)), 200)
+          : http.StreamedResponse(Stream.value(apk.sublist(9)), 206);
+    });
+    final file = await UpdateService.download(UpdateRelease.fromJson(release())!);
+    expect(ranges, [null, "bytes=9-"]);
+    expect(await file!.readAsBytes(), apk);
+    expect(UpdateService.state.value.stage, UpdateStage.ready);
+  });
+
+  test("an automatic download doesn't resume once the phone is on mobile data", () async {
+    var answers = 0;
+    UpdateService.client = () => MockClient.streaming((request, body) async {
+      answers++;
+      return http.StreamedResponse(dropped(apk.sublist(0, 9)), 200);
+    });
+    // Still on Wi-Fi when it drops; mobile data only by the time it would resume.
+    var checks = 0;
+    UpdateService.unmetered = () async => checks++ == 0;
+    UpdateService.retryWait = const Duration(milliseconds: 20);
+    Timer(const Duration(milliseconds: 5), () => UpdateService.unmetered = () async => false);
+    final file = await UpdateService.download(UpdateRelease.fromJson(release())!, automatic: true);
+    expect(file, isNull);
+    expect(answers, 1);
+    expect(UpdateService.state.value.stage, UpdateStage.failed);
+  });
+
+  test("a server sending the whole file again after a drop starts it over", () async {
+    var answers = 0;
+    UpdateService.client = () => MockClient.streaming((request, body) async {
+      answers++;
+      return answers == 1
+          ? http.StreamedResponse(dropped(apk.sublist(0, 9)), 200)
+          : http.StreamedResponse(Stream.value(apk), 200);
+    });
+    final file = await UpdateService.download(UpdateRelease.fromJson(release())!);
+    expect(await file!.readAsBytes(), apk);
+  });
+
+  test("a download that keeps dropping fails after a few tries", () async {
+    var answers = 0;
+    UpdateService.client = () => MockClient.streaming((request, body) async {
+      answers++;
+      return http.StreamedResponse(dropped(answers == 1 ? apk.sublist(0, 9) : const <int>[]), answers == 1 ? 200 : 206);
+    });
+    final file = await UpdateService.download(UpdateRelease.fromJson(release())!);
+    expect(file, isNull);
+    expect(answers, 1 + UpdateService.downloadRetries);
+    expect(UpdateService.state.value.stage, UpdateStage.failed);
+    expect(dir.listSync(), isEmpty);
+  });
+
+  test("an answer that won't change, like a missing file, isn't tried again", () async {
+    var answers = 0;
+    UpdateService.client = () => MockClient((request) async {
+      answers++;
+      return http.Response("Not Found", 404);
+    });
+    expect(await UpdateService.download(UpdateRelease.fromJson(release())!), isNull);
+    expect(answers, 1);
   });
 
   test("a skipped version is offered only when checking by hand", () async {

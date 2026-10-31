@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:finamp/components/global_snackbar.dart';
 import 'package:finamp/models/finamp_models.dart';
 import 'package:finamp/models/jellyfin_models.dart';
@@ -43,6 +44,40 @@ class PlayOnService {
   bool abortConnect = false;
   // If the connection retry loop is currently running
   bool retryActive = false;
+
+  /// Whether the phone has any network; without one, reconnecting waits for one instead of failing over and over.
+  @visibleForTesting
+  static Future<bool> Function() hasNetwork = () async => _connected(await Connectivity().checkConnectivity());
+  @visibleForTesting
+  static Stream<bool> Function() networkChanges = () => Connectivity().onConnectivityChanged.map(_connected);
+
+  static bool _connected(List<ConnectivityResult> results) =>
+      results.any((result) => result != ConnectivityResult.none);
+
+  /// How long reconnecting waits for a network before trying anyway: a server on a home network with no
+  /// internet can be reachable while the phone or PC reports no connection.
+  @visibleForTesting
+  static Duration networkWait = const Duration(minutes: 5);
+
+  /// Waits until the phone has a network, or [networkWait] at most. Returns whether a network came back.
+  @visibleForTesting
+  static Future<bool> waitForNetwork() async {
+    // Listening before checking, so a network coming back during the check isn't missed.
+    final online = Completer<void>();
+    final subscription = networkChanges().listen((connected) {
+      if (connected && !online.isCompleted) online.complete();
+    });
+    try {
+      if (await hasNetwork()) return false;
+      _playOnServiceLogger.info("No network, reconnecting PlayOn once there is one");
+      await online.future.timeout(networkWait);
+      return true;
+    } on TimeoutException {
+      return false;
+    } finally {
+      await subscription.cancel();
+    }
+  }
 
   Future<void> initialize() async {
     _playOnServiceLogger.info("Initializing PlayOn service");
@@ -181,6 +216,11 @@ class PlayOnService {
       retryActive = true;
       var retryCount = 0;
       while (true) {
+        // Offline, trying only fails: wait for a network, then start the back-off over.
+        if (await waitForNetwork()) {
+          retryCount = 0;
+          if (abortConnect) return;
+        }
         final retryDelay = (FinampSettingsHelper.finampSettings.playOnReconnectionDelay * pow(1.3, retryCount)).round();
         await Future<void>.delayed(Duration(seconds: retryDelay));
         retryCount++;

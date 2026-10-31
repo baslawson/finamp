@@ -28,7 +28,8 @@ _RpcStatus _targetStatus = _RpcStatus.stopped;
 class DiscordRpc {
   static void initialize() {
     if (!(Platform.isWindows || Platform.isLinux || Platform.isMacOS)) {
-      _rpcLogger.warning("Discord RPC is only supported on Desktop platforms, skipping initialization.");
+      // Expected on phones, so not a warning: it would show in every log.
+      _rpcLogger.fine("Discord RPC is only supported on Desktop platforms, skipping initialization.");
       return;
     }
 
