@@ -7,7 +7,6 @@ import 'package:finamp/menus/components/menuEntries/not_for_this_mood_menu_entry
 import 'package:finamp/menus/components/menuEntries/good_match_next_menu_entry.dart';
 import 'package:finamp/menus/components/menuEntries/mix_map_menu_entry.dart';
 import 'package:finamp/menus/components/menuEntries/listening_choices_menu_entry.dart';
-import 'package:finamp/menus/components/menuEntries/mashup_menu_entry.dart';
 import 'package:finamp/menus/components/menuEntries/prepare_karaoke_menu_entry.dart';
 import 'package:finamp/services/karaoke_service.dart';
 
@@ -268,7 +267,6 @@ class _TrackMenuState extends ConsumerState<TrackMenu> with TickerProviderStateM
       PrepareKaraokeMenuEntry(item: widget.item),
       PrepareKaraokeMenuEntry(item: widget.item, part: KaraokePart.drums),
       PrepareKaraokeMenuEntry(item: widget.item, part: KaraokePart.both),
-      MashupMenuEntry(item: widget.item),
       StartRadioMenuEntry(baseItem: widget.item),
       AdaptiveDownloadLockDeleteMenuEntry(baseItem: widget.item),
       ToggleFavoriteMenuEntry(baseItem: widget.item),

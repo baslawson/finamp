@@ -15,13 +15,11 @@ import time
 from contextlib import asynccontextmanager
 from contextlib import ExitStack
 from pathlib import Path
-from typing import Literal
 
 import requests
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
-import mashup
 from server_auth import token_problem
 from server_http import HttpPool
 from server_runtime import RuntimeGovernor
@@ -33,9 +31,6 @@ DRUM_MODEL = os.environ.get("KARAOKE_DRUM_MODEL", "kuielab_a_drums.onnx")
 # Which part of the song a preparation removes: vocals for singing along, drums for drumming along, or both. The
 # guide the mixes bring back is the last part removed, so "both" has guide drums.
 PARTS = ('vocals', 'drums', 'both')
-# Mashups (one song's vocals over another's instrumental) share the queue as their own part, keyed "vocals+backing".
-MASHUP = 'mashup'
-GUIDES = ('0', '25', '50', '75', '100')
 NOUNS = {'vocals': 'vocal', 'drums': 'drum', 'both': 'drum'}
 SEPARATIONS = {'vocals': 'vocal', 'drums': 'drum', 'both': 'vocal and drum'}
 SEPARATED = {'vocals': 'vocals', 'drums': 'drums', 'both': 'vocals and drums'}
@@ -86,61 +81,6 @@ def vocals_removed(song, connection, revision):
     return ROOT / row['revision'] / 'mix-0.flac'
 
 
-def vocals_alone(song, connection, revision):
-    """The song's ready karaoke vocals on their own, kept by preparations since mashups; None for older ones."""
-    if vocals_removed(song, connection, revision) is None:
-        return None
-    try:
-        size = json.loads((ROOT / revision / 'result.json').read_text())['vocals']['bytes']
-        if type(size) is int and size > 0 and (ROOT / revision / 'vocals.flac').stat().st_size == size:
-            return ROOT / revision / 'vocals.flac'
-    except (OSError, ValueError, TypeError, KeyError):
-        pass
-    return None
-
-
-def pair_of(vocals, backing):
-    """The job id of a mashup: the singer's song, then the backing song."""
-    vocals, backing = track_id(vocals), track_id(backing)
-    if vocals == backing:
-        raise HTTPException(400, 'Choose two different songs')
-    return f'{vocals}+{backing}'
-
-
-def mashup_revision(pair, plan):
-    """Changes when either original or the plan does."""
-    vocals, backing = pair.split('+')
-    plan = json.dumps(plan, sort_keys=True, separators=(',', ':'))
-    return hashlib.sha256(f'{MASHUP}:v1:{source_for(vocals)[1]}:{source_for(backing)[1]}:{plan}'.encode()).hexdigest()
-
-
-class MashupGrid(BaseModel):
-    firstBeat: float = Field(ge=0, le=MAX_SECONDS)
-    period: float = Field(gt=0.15, lt=2)
-    duration: float = Field(gt=0, le=MAX_SECONDS)
-    intro: float = Field(ge=0, le=MAX_SECONDS)
-
-
-class BackingGrid(MashupGrid):
-    end: float = Field(gt=0, le=MAX_SECONDS)
-
-
-class MashupPlan(BaseModel):
-    """What the analyzer worked out for the pair (mashup.plan); the worker follows it."""
-    version: Literal[1]
-    tempo: float = Field(ge=1 - mashup.MAX_TEMPO - 1e-6, le=1 + mashup.MAX_TEMPO + 1e-6)
-    semitones: int = Field(ge=-mashup.MAX_SEMITONES, le=mashup.MAX_SEMITONES)
-    key: Literal['same', 'relative', 'neighbour']
-    score: float = Field(ge=0, le=1)
-    warnings: list[str] = Field(max_length=4)
-    vocals: MashupGrid
-    backing: BackingGrid
-
-
-class MashupRequest(BaseModel):
-    plan: MashupPlan
-
-
 def connect():
     connection = sqlite3.connect(ROOT / "jobs.db", timeout=15)
     connection.row_factory = sqlite3.Row
@@ -159,10 +99,16 @@ def migrate(connection):
         connection.execute("INSERT INTO jobs SELECT id,'vocals',revision,state,progress,message,queued,seconds FROM jobs_before_parts")
         connection.execute('DROP TABLE jobs_before_parts')
         connection.commit()
-    # A mashup's plan. Servers from before mashups ignore the column, so rolling back keeps working.
-    if 'plan' not in [column[1] for column in connection.execute('PRAGMA table_info(jobs)')]:
-        connection.execute('ALTER TABLE jobs ADD COLUMN plan TEXT')
+    # Mashups (1.6.81 and 1.6.82) were removed; their jobs would stall the queue and break listings and cleanup.
+    placeholders = ','.join('?' * len(PARTS))
+    retired = connection.execute(f'SELECT revision FROM jobs WHERE part NOT IN ({placeholders})', PARTS).fetchall()
+    if retired:
+        connection.execute(f'DELETE FROM jobs WHERE part NOT IN ({placeholders})', PARTS)
         connection.commit()
+        for (revision,) in retired:
+            if revision and re.fullmatch('[0-9a-f]{64}', revision) and not connection.execute(
+                    'SELECT 1 FROM jobs WHERE revision=?', (revision,)).fetchone():
+                shutil.rmtree(ROOT / revision, ignore_errors=True)
 
 
 def source_for(song, part='vocals'):
@@ -224,17 +170,13 @@ def sources_for(songs, part='vocals'):
     return result
 
 
-def mix_file(directory, name):
-    return directory / (f'{MASHUP}.flac' if name == MASHUP else f'mix-{name}.flac')
-
-
-def read_result(directory, names=GUIDES):
+def read_result(directory):
     manifest = json.loads((directory / 'result.json').read_text())
     mixes = manifest['mixes']
-    for name in names:
-        mix = mixes[name]
+    for guide in (0, 25, 50, 75, 100):
+        mix = mixes[str(guide)]
         size = mix['bytes']
-        if type(size) is not int or size <= 0 or mix_file(directory, name).stat().st_size != size:
+        if type(size) is not int or size <= 0 or (directory / f'mix-{guide}.flac').stat().st_size != size:
             raise ValueError('Incomplete cached audio')
         if mix['version'] != 1 or not all(type(mix[key]) in (int, float) and math.isfinite(mix[key])
                                         for key in ('lufs', 'truePeak')):
@@ -243,8 +185,7 @@ def read_result(directory, names=GUIDES):
     if type(seconds) not in (int, float) or not math.isfinite(seconds) or seconds < 0:
         raise ValueError('Invalid preparation time')
     # Cache metadata cannot replace the queue's state or revision.
-    # A mashup's placement tells the app where the vocals moved, for lining up the singer's lyrics.
-    return {key: manifest[key] for key in ('mixes', 'seconds', 'model', 'placement') if key in manifest}
+    return {key: manifest[key] for key in ('mixes', 'seconds', 'model') if key in manifest}
 
 
 def describe(row, part='vocals'):
@@ -252,14 +193,9 @@ def describe(row, part='vocals'):
         return {"state": "missing", "progress": 0, "part": part}
     result = {"state": row["state"], "revision": row["revision"], "progress": row["progress"],
               "message": row["message"], "seconds": row["seconds"], "part": row["part"]}
-    if row['part'] == MASHUP:
-        vocals, backing = row['id'].split('+')
-        plan = json.loads(row['plan'])
-        result.update(vocals=vocals, backing=backing,
-                      plan={key: plan[key] for key in ('tempo', 'semitones', 'key', 'score', 'warnings')})
     if row["state"] == "ready":
         try:
-            result.update(read_result(ROOT / row['revision'], (MASHUP,) if row['part'] == MASHUP else GUIDES))
+            result.update(read_result(ROOT / row['revision']))
         except (OSError, ValueError, TypeError, KeyError):
             result.update(state="missing", progress=0, message="Prepare this song again")
     return result
@@ -296,18 +232,24 @@ def work_one(stop, leases):
             leases.callback(runtime.release, 'karaoke', lease)
         song, revision, part = row["id"], row["revision"], row["part"]
         connection.execute("UPDATE jobs SET state='processing',progress=0.02,message=? WHERE id=? AND part=?",
-                           ('Getting the songs ready' if part == MASHUP else
-                            f'Loading {SEPARATIONS[part]} separation model', song, part))
+                           (f'Loading {SEPARATIONS[part]} separation model', song, part))
     destination = ROOT / revision
     try:
-        if part == MASHUP:
-            make_mashup(song, revision, json.loads(row['plan']), destination, stop)
-            return
         path, current = source_for(song, part)
         if current != revision:
             raise RuntimeError("The original song changed; prepare it again")
-        duration = duration_of(path)
-        start_in(destination)
+        duration = float(json.loads(subprocess.run(
+            ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', str(path)],
+            capture_output=True, text=True, check=True, timeout=30,
+        ).stdout)['format']['duration'])
+        if duration <= 0 or duration > MAX_SECONDS:
+            raise RuntimeError("Choose a song shorter than 20 minutes")
+        if shutil.disk_usage(ROOT).free < 2 * 1024 ** 3:
+            raise RuntimeError("The server needs at least 2 GB of free cache space")
+        destination.mkdir(exist_ok=True)
+        for file in destination.iterdir():
+            if file.is_file() and file.suffix in ('.wav', '.flac', '.json', '.tmp'):
+                file.unlink()
         source, models = path, model_for(part)
         if part == 'both':
             vocal_revision = source_for(song)[1]
@@ -318,16 +260,27 @@ def work_one(stop, leases):
                     source, models = destination / 'instrumental.flac', DRUM_MODEL
                     shutil.copyfile(instrumental, source)
         passes = len(models.split(','))
-
-        def mixing():
-            count = len(list(destination.glob('mix-*.flac')))
-            return {'progress': .75 + count * .04, 'message': f'Preparing guide-{NOUNS[part]} mixes ({count}/5)'} \
-                if count else None
-        if run_worker([sys.executable, str(Path(__file__).with_name('karaoke_worker.py')), str(source),
-                       str(destination), str(ROOT / 'models'), models, part], song, revision, destination, stop,
-                      max(3600, duration * 12) * passes, f'Loading the model and separating {SEPARATED[part]}',
-                      mixing):
-            raise RuntimeError(f"{SEPARATIONS[part].capitalize()} separation failed; the server may need more memory")
+        with (destination / 'worker.log').open('w') as output:
+            process = subprocess.Popen(
+                [sys.executable, str(Path(__file__).with_name('karaoke_worker.py')), str(source),
+                 str(destination), str(ROOT / 'models'), models, part], stdout=output, stderr=output,
+            )
+            started = time.monotonic()
+            while process.poll() is None:
+                elapsed = time.monotonic() - started
+                if stop.wait(2) or elapsed > max(3600, duration * 12) * passes:
+                    process.kill()
+                    process.wait()
+                    raise RuntimeError("Preparation interrupted; tap Prepare to retry")
+                # Stage progress, never an invented ETA or percentage for neural inference.
+                count = len(list(destination.glob('mix-*.flac')))
+                progress = destination / 'progress.json'
+                separation = json.loads(progress.read_text()) if progress.is_file() else {
+                    'progress': .05, 'message': f'Loading the model and separating {SEPARATED[part]}'}
+                update(song, revision, **(separation if count == 0 else {
+                    'progress': .75 + count * .04, 'message': f'Preparing guide-{NOUNS[part]} mixes ({count}/5)'}))
+            if process.returncode:
+                raise RuntimeError(f"{SEPARATIONS[part].capitalize()} separation failed; the server may need more memory")
         if source != path:
             source.unlink(missing_ok=True)
         if source_for(song, part)[1] != revision:
@@ -343,91 +296,7 @@ def work_one(stop, leases):
                 for file in destination.iterdir():
                     if file.suffix in ('.wav', '.flac', '.json'):
                         file.unlink(missing_ok=True)
-                    elif file.is_dir() and not file.is_symlink():
-                        # A mashup's separations in progress.
-                        shutil.rmtree(file, ignore_errors=True)
             update(song, revision, state='failed', progress=0, message=message[:180])
-
-
-def duration_of(path):
-    duration = float(json.loads(subprocess.run(
-        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration', '-of', 'json', str(path)],
-        capture_output=True, text=True, check=True, timeout=30,
-    ).stdout)['format']['duration'])
-    if duration <= 0 or duration > MAX_SECONDS:
-        raise RuntimeError("Choose a song shorter than 20 minutes")
-    return duration
-
-
-def start_in(destination):
-    """An empty job folder, once there's room for the job's files."""
-    if shutil.disk_usage(ROOT).free < 2 * 1024 ** 3:
-        raise RuntimeError("The server needs at least 2 GB of free cache space")
-    destination.mkdir(exist_ok=True)
-    for file in destination.iterdir():
-        if file.is_file() and file.suffix in ('.wav', '.flac', '.json', '.tmp'):
-            file.unlink()
-        elif file.is_dir() and not file.is_symlink():
-            shutil.rmtree(file)
-
-
-def run_worker(command, song, revision, destination, stop, limit, waiting, override=lambda: None):
-    """Runs a worker subprocess, passing on its progress.json (or [waiting] before it has one, or what [override]
-    says). Returns its exit code."""
-    with (destination / 'worker.log').open('w') as output:
-        process = subprocess.Popen(command, stdout=output, stderr=output)
-        started = time.monotonic()
-        while process.poll() is None:
-            elapsed = time.monotonic() - started
-            if stop.wait(2) or elapsed > limit:
-                process.kill()
-                process.wait()
-                raise RuntimeError("Preparation interrupted; tap Prepare to retry")
-            # Stage progress, never an invented ETA or percentage for neural inference.
-            progress = destination / 'progress.json'
-            state = override() or (json.loads(progress.read_text()) if progress.is_file() else
-                                   {'progress': .05, 'message': waiting})
-            update(song, revision, **state)
-    return process.returncode
-
-
-def make_mashup(pair, revision, plan, destination, stop):
-    """Hands the worker the singer's vocals and the backing song's instrumental from the karaoke cache when it holds
-    them, and the originals to separate when it doesn't."""
-    vocals, backing = pair.split('+')
-    (vocals_path, vocals_revision), (backing_path, backing_revision) = source_for(vocals), source_for(backing)
-    if mashup_revision(pair, plan) != revision:
-        raise RuntimeError('One of the songs changed; make the mashup again')
-    duration = max(duration_of(vocals_path), duration_of(backing_path))
-    start_in(destination)
-    job = {'plan': plan, 'model': MODEL, 'vocals': {'source': str(vocals_path)},
-           'backing': {'source': str(backing_path)}}
-    # Copied under the lock, so deleting a karaoke can't take its files away part way.
-    with lock, connect() as connection:
-        stem = vocals_alone(vocals, connection, vocals_revision)
-        if stem is not None:
-            shutil.copyfile(stem, destination / 'vocals-in.flac')
-            shutil.copyfile(stem.with_name('mix-0.flac'), destination / 'vocals-backing-in.flac')
-            job['vocals'].update(stem='vocals-in.flac', instrumental='vocals-backing-in.flac')
-        instrumental = vocals_removed(backing, connection, backing_revision)
-        if instrumental is not None:
-            shutil.copyfile(instrumental, destination / 'backing-in.flac')
-            job['backing']['instrumental'] = 'backing-in.flac'
-            sung = vocals_alone(backing, connection, backing_revision)
-            if sung is not None:
-                shutil.copyfile(sung, destination / 'backing-vocals-in.flac')
-                job['backing']['vocals'] = 'backing-vocals-in.flac'
-    (destination / 'job.json').write_text(json.dumps(job))
-    passes = (stem is None) + (instrumental is None)
-    if run_worker([sys.executable, str(Path(__file__).with_name('mashup_worker.py')), str(destination),
-                   str(ROOT / 'models')], pair, revision, destination, stop,
-                  max(3600, duration * 12) * max(1, passes),
-                  'Loading the vocal separation model' if passes else 'Fitting the vocals to the beat and key'):
-        raise RuntimeError('Making the mashup failed; the server may need more memory')
-    if mashup_revision(pair, plan) != revision:
-        raise RuntimeError('One of the songs changed while making the mashup; make it again')
-    manifest = read_result(destination, (MASHUP,))
-    update(pair, revision, state='ready', progress=1, message='Ready', seconds=manifest['seconds'])
 
 
 @asynccontextmanager
@@ -469,14 +338,12 @@ def catalogue(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)
               part: str = 'vocals'):
     if state not in ('', 'queued', 'processing', 'ready', 'failed'):
         raise HTTPException(400, 'Invalid karaoke state')
-    # Apps from before drums only understand vocal jobs, so they see only those. Mashups are listed only when asked
-    # for: apps from before them read every job of 'all' as one song's karaoke.
-    if part not in ('all', MASHUP):
+    # Apps from before drums only understand vocal jobs, so they see only those.
+    if part != 'all':
         part_of(part)
     filters = [(column, value) for column, value in (('state', state), ('part', part)) if value not in ('', 'all')]
-    conditions = [f'{column}=?' for column, _ in filters] + (['part<>?'] if part == 'all' else [])
-    where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
-    parameters = [value for _, value in filters] + ([MASHUP] if part == 'all' else [])
+    where = ' WHERE ' + ' AND '.join(f'{column}=?' for column, _ in filters) if filters else ''
+    parameters = [value for _, value in filters]
     with lock, connect() as connection:
         total = connection.execute('SELECT COUNT(*) FROM jobs' + where, parameters).fetchone()[0]
         rows = connection.execute('SELECT * FROM jobs' + where +
@@ -487,12 +354,12 @@ def catalogue(offset: int = Query(0, ge=0), limit: int = Query(50, ge=1, le=100)
             'offset': offset, 'limit': limit}
 
 
-def current_revision(song, fresh=True, part='vocals', plan=None):
+def current_revision(song, fresh=True, part='vocals'):
     now = time.monotonic()
     cached = REVISIONS.get((song, part))
     if not fresh and cached and now - cached[0] < REVISION_SECONDS:
         return cached[1]
-    value = mashup_revision(song, plan) if part == MASHUP else source_for(song, part)[1]
+    value = source_for(song, part)[1]
     if len(REVISIONS) > 512:
         REVISIONS.clear()
     REVISIONS[(song, part)] = (now, value)
@@ -534,8 +401,7 @@ def status(song: str, part: str = 'vocals'):
 def job_status(song, fresh=True, part='vocals'):
     with lock, connect() as connection:
         row = connection.execute('SELECT * FROM jobs WHERE id=? AND part=?', (song, part)).fetchone()
-    if row and row['state'] == 'ready' and current_revision(
-            song, fresh, part, json.loads(row['plan']) if part == MASHUP else None) != row['revision']:
+    if row and row['state'] == 'ready' and current_revision(song, fresh, part) != row['revision']:
         return {'state': 'missing', 'progress': 0, 'part': part,
                 'message': 'The original song changed; prepare it again'}
     return describe(row, part)
@@ -544,10 +410,7 @@ def job_status(song, fresh=True, part='vocals'):
 @app.post('/karaoke/{song}', dependencies=[Depends(authorize)], status_code=202)
 def enqueue(song: str, part: str = 'vocals'):
     song, part = track_id(song), part_of(part)
-    return queue(song, part, source_for(song, part)[1])
-
-
-def queue(song, part, revision, plan=None):
+    _, revision = source_for(song, part)
     with lock, connect() as connection:
         row = connection.execute('SELECT * FROM jobs WHERE id=? AND part=?', (song, part)).fetchone()
         if row and row['revision'] == revision and describe(row)['state'] in ('queued', 'processing', 'ready'):
@@ -556,43 +419,16 @@ def queue(song, part, revision, plan=None):
             raise HTTPException(409, 'Wait for the current preparation to finish')
         if connection.execute("SELECT COUNT(*) FROM jobs WHERE state IN ('queued','processing')").fetchone()[0] >= MAX_QUEUED:
             raise HTTPException(429, 'The karaoke queue is full; try again later')
-        connection.execute('INSERT OR REPLACE INTO jobs (id,part,revision,state,progress,message,queued,seconds,plan) '
-                           'VALUES (?,?,?,?,?,?,?,?,?)',
-                           (song, part, revision, 'queued', 0, 'Waiting for the server', time.time(), None,
-                            None if plan is None else json.dumps(plan)))
+        connection.execute('INSERT OR REPLACE INTO jobs (id,part,revision,state,progress,message,queued,seconds) '
+                           'VALUES (?,?,?,?,?,?,?,?)',
+                           (song, part, revision, 'queued', 0, 'Waiting for the server', time.time(), None))
         row = connection.execute('SELECT * FROM jobs WHERE id=? AND part=?', (song, part)).fetchone()
     return describe(row)
 
 
-@app.post('/mashup/{vocals}/{backing}', dependencies=[Depends(authorize)], status_code=202)
-def enqueue_mashup(vocals: str, backing: str, request: MashupRequest):
-    """Queues the vocals of [vocals] over the instrumental of [backing], fitted as the analyzer's plan says."""
-    pair = pair_of(vocals, backing)
-    plan = request.plan.model_dump()
-    return queue(pair, MASHUP, mashup_revision(pair, plan), plan)
-
-
-@app.get('/mashup/{vocals}/{backing}', dependencies=[Depends(authorize)])
-def mashup_status(vocals: str, backing: str):
-    return job_status(pair_of(vocals, backing), part=MASHUP)
-
-
-@app.delete('/mashup/{vocals}/{backing}', dependencies=[Depends(authorize)])
-def delete_mashup(vocals: str, backing: str, revision: str = ''):
-    return remove(pair_of(vocals, backing), revision, MASHUP)
-
-
-@app.get('/mashup/{vocals}/{backing}/audio', dependencies=[Depends(authorize)])
-def mashup_audio(vocals: str, backing: str, revision: str = ''):
-    return serve(pair_of(vocals, backing), MASHUP, revision, MASHUP)
-
-
 @app.delete('/karaoke/{song}', dependencies=[Depends(authorize)])
 def delete(song: str, revision: str = '', part: str = 'vocals'):
-    return remove(track_id(song), revision, part_of(part))
-
-
-def remove(song, revision, part):
+    song, part = track_id(song), part_of(part)
     with lock, connect() as connection:
         row = connection.execute('SELECT * FROM jobs WHERE id=? AND part=?', (song, part)).fetchone()
         if row is None:
@@ -624,15 +460,11 @@ def audio(song: str, guide: int = Query(0, ge=0, le=100), revision: str = '', pa
     song, part = track_id(song), part_of(part)
     if guide not in (0, 25, 50, 75, 100):
         raise HTTPException(400, f'Guide {NOUNS[part]} levels must be 0, 25, 50, 75 or 100')
-    return serve(song, part, revision, str(guide))
-
-
-def serve(song, part, revision, name):
     result = job_status(song, fresh=False, part=part)
     if result['state'] != 'ready' or result['revision'] != revision:
         raise HTTPException(409, 'This karaoke version is no longer available; prepare it again')
     marker = ROOT / revision / '.last-used'
     if not marker.exists() or time.time() - marker.stat().st_mtime >= 60:
         marker.touch()
-    return FileResponse(mix_file(ROOT / revision, name), media_type='audio/flac',
+    return FileResponse(ROOT / revision / f'mix-{guide}.flac', media_type='audio/flac',
                         headers={'Cache-Control': 'private, max-age=86400'})

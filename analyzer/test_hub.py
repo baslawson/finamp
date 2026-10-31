@@ -697,39 +697,20 @@ class HubTests(unittest.TestCase):
         with sqlite3.connect(root / 'jobs.db') as db:
             db.execute('CREATE TABLE jobs(id TEXT,part TEXT,revision TEXT,state TEXT,progress REAL,message TEXT,'
                        'queued REAL,seconds REAL)')
-            for part, version in [('vocals', 'e' * 64), ('drums', 'f' * 64)]:
+            # A removed mashup, used longest ago, left by a karaoke server that hasn't been updated yet.
+            for song, part, version, used in [(f'{SECOND}+{SECOND}', 'mashup', 'd' * 64, 0),
+                                              (SECOND, 'vocals', 'e' * 64, 1), (SECOND, 'drums', 'f' * 64, 1)]:
                 directory = root / version
                 directory.mkdir()
                 (directory / 'mix-0.flac').write_bytes(b'cache')
                 marker = directory / '.last-used'
                 marker.touch()
-                os.utime(marker, (1, 1))
-                db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?)', (SECOND, part, version, 'ready', 1, '', 1, 1))
+                os.utime(marker, (used, used))
+                db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?)', (song, part, version, 'ready', 1, '', 1, 1))
         self.hub.jobs.cleanup({})
         deleted = sorted(call.kwargs['params']['revision'] + ' ' + call.kwargs['params'].get('part', '-')
                          for call in self.hub.karaoke.call_args_list if call.args[0] == 'DELETE')
         self.assertEqual(deleted, ['e' * 64 + ' -', 'f' * 64 + ' drums'])
-
-    def test_cleanup_expires_mashups_through_their_own_route(self):
-        root = self.root / 'karaoke'
-        root.mkdir()
-        # Both songs are kept for overnight karaoke; their mashup still expires like any other mix.
-        self.hub.store.save_settings({'nightlySongs': [SONG, SECOND], 'nightlyFavorites': False, 'cacheDays': 1})
-        with sqlite3.connect(root / 'jobs.db') as db:
-            db.execute('CREATE TABLE jobs(id TEXT,part TEXT,revision TEXT,state TEXT,progress REAL,message TEXT,'
-                       'queued REAL,seconds REAL,plan TEXT)')
-            directory = root / ('d' * 64)
-            directory.mkdir()
-            (directory / 'mashup.flac').write_bytes(b'cache')
-            marker = directory / '.last-used'
-            marker.touch()
-            os.utime(marker, (1, 1))
-            db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?)',
-                       (f'{SONG}+{SECOND}', 'mashup', 'd' * 64, 'ready', 1, '', 1, 1, '{}'))
-        self.hub.jobs.cleanup({})
-        deleted = [call for call in self.hub.karaoke.call_args_list if call.args[0] == 'DELETE']
-        self.assertEqual([(call.args[1], call.kwargs['params']) for call in deleted],
-                         [(f'/mashup/{SONG}/{SECOND}', {'revision': 'd' * 64})])
 
     def test_backup_round_trip_and_corruption_rejected(self):
         native = self.root / 'native'

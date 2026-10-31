@@ -6,7 +6,6 @@ import 'package:finamp/models/jellyfin_models.dart';
 import 'package:finamp/services/current_track_metadata_provider.dart';
 import 'package:finamp/services/music_player_background_task.dart';
 import 'package:finamp/services/karaoke_service.dart';
-import 'package:finamp/services/lyrics_timeline.dart';
 import 'package:finamp/services/karaoke_practice.dart';
 import 'package:finamp/screens/karaoke_dashboard_screen.dart';
 import 'package:finamp/services/queue_service.dart';
@@ -249,17 +248,12 @@ class _KaraokeScreenState extends ConsumerState<KaraokeScreen> with SingleTicker
     try {
       final file = await _service.download(song, job, guide, keepOffline: saveOnly, offline: _offline);
       if (!mounted || generation != _generation || _leaving) return;
-      // The song's own timings: a mashup playing shows them moved to its audio.
-      final shown = ref.read(currentTrackMetadataProvider).valueOrNull;
-      final lyrics = shown?.originalLyrics ?? shown?.lyrics;
+      final lyrics = ref.read(currentTrackMetadataProvider).valueOrNull?.lyrics;
       if (lyrics != null) await _service.saveLyrics(song, lyrics);
       if (!mounted || generation != _generation || _leaving) return;
       if (saveOnly) {
-        final track = GetIt.instance<QueueService>().getCurrentTrack();
-        final item = track?.baseItem;
-        // As the song itself, even while a mashup of it plays under its own title.
-        final original = item == null ? null : LyricsTimeline.of(track!)?.original(item) ?? item;
-        if (original != null) await _service.saveOfflineDetails(original, lyrics ?? _savedLyrics);
+        final item = GetIt.instance<QueueService>().getCurrentTrack()?.baseItem;
+        if (item != null) await _service.saveOfflineDetails(item, lyrics ?? _savedLyrics);
       }
       if (!saveOnly) {
         await _player.setKaraokeMix(queueId: queueId, file: file, measurement: job.measurement(guide));
@@ -526,15 +520,7 @@ class _KaraokeScreenState extends ConsumerState<KaraokeScreen> with SingleTicker
   Widget build(BuildContext context) {
     ref.listen(currentTrackProvider, (_, _) => _loadCurrent());
     final metadata = ref.watch(currentTrackMetadataProvider).valueOrNull;
-    var lyrics = metadata?.lyrics;
-    final track = ref.watch(currentTrackProvider).value;
-    if (lyrics == null && _savedLyrics != null && track != null && LyricsTimeline.of(track) != null) {
-      // The saved lyrics keep the song's own timings; a mashup playing moves them to its audio.
-      ref.watch(karaokeMixChangesProvider);
-      final playing = GetIt.instance<MusicPlayerBackgroundTask>().karaokeMixPathFor(track);
-      lyrics = LyricsTimeline.playing(track, playing)?.apply(_savedLyrics!);
-    }
-    final lines = (lyrics ?? _savedLyrics)?.lyrics ?? const <LyricLine>[];
+    final lines = (metadata?.lyrics ?? _savedLyrics)?.lyrics ?? const <LyricLine>[];
     final synced = lines.isNotEmpty && lines.first.start != null;
     final theme = Theme.of(context);
     // The theme colour brightened, so it stands out on the black background.

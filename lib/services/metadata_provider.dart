@@ -23,9 +23,6 @@ class MetadataProvider {
   final PlaybackInfoResponse playbackInfo;
   final BaseItemDto item;
   LyricDto? lyrics;
-
-  /// The song's own lyrics when [lyrics] were moved to a remix's timeline (see LyricsTimeline); what gets saved.
-  final LyricDto? originalLyrics;
   bool isDownloaded;
   bool qualifiesForPlaybackSpeedControl;
   double? albumNormalizationGain;
@@ -35,7 +32,6 @@ class MetadataProvider {
     required this.item,
     required this.playbackInfo,
     this.lyrics,
-    this.originalLyrics,
     this.isDownloaded = false,
     this.qualifiesForPlaybackSpeedControl = false,
     this.albumNormalizationGain,
@@ -50,11 +46,10 @@ class MetadataProvider {
   /// Whether lyrics are available, from the server or found on LRCLIB.
   bool get hasLyrics => serverHasLyrics || lyrics != null;
 
-  MetadataProvider withLyrics(LyricDto lyrics, {LyricDto? original}) => MetadataProvider(
+  MetadataProvider withLyrics(LyricDto lyrics) => MetadataProvider(
     item: item,
     playbackInfo: playbackInfo,
     lyrics: lyrics,
-    originalLyrics: original,
     isDownloaded: isDownloaded,
     qualifiesForPlaybackSpeedControl: qualifiesForPlaybackSpeedControl,
     albumNormalizationGain: albumNormalizationGain,

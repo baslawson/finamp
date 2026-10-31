@@ -11,15 +11,14 @@ RUN pip install --no-cache-dir "audio-separator[cpu]==0.30.2" "torch==2.5.1" \
     "numpy==1.26.4" "onnxruntime==1.20.1" "fastapi==0.115.6" "uvicorn==0.34.0" "requests==2.32.3"
 
 FROM ${BASE_IMAGE}
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libsndfile1 rubberband-cli \
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libsndfile1 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /opt/venv /opt/venv
 ENV PATH=/opt/venv/bin:$PATH
 WORKDIR /app
 COPY entrypoint.sh /entrypoint.sh
 RUN sed -i 's/\r$//' /entrypoint.sh && chmod 755 /entrypoint.sh
-COPY karaoke.py karaoke_proxy.py karaoke_worker.py mashup.py mashup_worker.py server_*.py test_karaoke.py \
-    test_karaoke_worker.py test_mashup.py test_mashup_worker.py ./
+COPY karaoke.py karaoke_proxy.py karaoke_worker.py server_*.py test_karaoke.py test_karaoke_worker.py ./
 ENV OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMBA_NUM_THREADS=1 \
     DATA_DIR=/data PYTHONUNBUFFERED=1
 HEALTHCHECK --interval=60s --timeout=10s --start-period=60s --retries=3 \

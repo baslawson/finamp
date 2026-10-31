@@ -16,7 +16,6 @@ import 'package:finamp/services/favorite_provider.dart';
 import 'package:finamp/services/finamp_user_helper.dart';
 import 'package:finamp/services/playback_history_service.dart';
 import 'package:finamp/services/queue_service.dart';
-import 'package:finamp/services/lyrics_timeline.dart';
 import 'package:finamp/services/radio_service_helper.dart' as radio_service_helper;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -600,24 +599,12 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
   LoudnessMeasurement? _karaokeMeasurement;
   Future<void> _karaokeOperation = Future.value();
   bool _karaokeSwitching = false;
-  ({String song, File file, LoudnessMeasurement? measurement, Map<String, dynamic>? extras})? _savedKaraoke;
+  ({String song, File file, LoudnessMeasurement? measurement})? _savedKaraoke;
 
   bool get karaokeActive =>
       _karaokeSwitching ||
       mediaItem.valueOrNull?.extras?['karaokeSaved'] == true ||
       (_karaokeFile != null && mediaItem.valueOrNull?.id == _karaokeMediaId);
-
-  final _karaokeMixChanges = StreamController<void>.broadcast();
-
-  /// Tells when the karaoke mix a queue entry plays may have changed; see [karaokeMixPathFor].
-  Stream<void> get karaokeMixChanges => _karaokeMixChanges.stream;
-
-  /// The karaoke mix [track] plays, if any: one put in its place, or the saved song's own.
-  String? karaokeMixPathFor(FinampQueueItem track) {
-    if (_karaokeFile != null && track.id == _karaokeQueueId) return _karaokeFile!.path;
-    if (track.item.extras?['karaokeSaved'] != true) return null;
-    return track.item.extras?['downloadedTrackPath'] as String?;
-  }
 
   /// The karaoke mix the current song plays, if any. A saved song keeps its own mix until another is applied.
   String? get karaokeMixPath {
@@ -631,14 +618,12 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
     jellyfin_models.BaseItemDto item,
     File file,
     LoudnessMeasurement? measurement,
-    String sourceName, {
-    // More details for the queue item, such as where a mashup moved the singing (LyricsTimeline).
-    Map<String, dynamic>? extras,
-  }) async {
+    String sourceName,
+  ) async {
     _karaokeSwitching = true;
     try {
       await CrossfadeService.cancelForKaraoke();
-      _savedKaraoke = (song: item.id.raw, file: file, measurement: measurement, extras: extras);
+      _savedKaraoke = (song: item.id.raw, file: file, measurement: measurement);
       await GetIt.instance<QueueService>().startPlayback(
         items: [item],
         beginPlaying: false,
@@ -783,7 +768,6 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
           entry.item = entry.item.copyWith(
             extras: {
               ...?entry.item.extras,
-              ...?saved.extras,
               'downloadedTrackPath': saved.file.path,
               'karaokeSaved': true,
               if (measurement != null)
@@ -802,12 +786,6 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
         _karaokeFile = null;
         _karaokeMeasurement = null;
       }
-      // A remix played as its original song lasts as long as the audio in its place.
-      for (final entry in queueItems) {
-        final length = LyricsTimeline.lengthWhile(entry, karaokeMixPathFor(entry));
-        if (length != null && length != entry.item.duration) entry.item = entry.item.copyWith(duration: length);
-      }
-      _karaokeMixChanges.add(null);
       final initialTrack = queueItems.elementAtOrNull(initialIndex ?? 0)?.item;
       if (initialTrack != null) {
         await LoudnessCache.instance.load();

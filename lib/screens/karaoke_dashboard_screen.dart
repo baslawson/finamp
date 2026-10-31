@@ -6,7 +6,6 @@ import 'package:finamp/components/karaoke_part_text.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/models/jellyfin_models.dart';
 import 'package:finamp/screens/karaoke_screen.dart';
-import 'package:finamp/screens/mashup_screen.dart';
 import 'package:finamp/screens/saved_karaoke_screen.dart';
 import 'package:finamp/services/finamp_settings_helper.dart';
 import 'package:finamp/services/jellyfin_api_helper.dart';
@@ -168,25 +167,9 @@ class _KaraokeDashboardScreenState extends State<KaraokeDashboardScreen> {
       children: [
         if (_busy) const LinearProgressIndicator(),
         Padding(padding: const EdgeInsets.all(16), child: Text(context.l10n.karaokeDashboardHelp)),
-        Wrap(
-          alignment: WrapAlignment.center,
-          children: [
-            TextButton(
-              onPressed: _busy ? null : () => Navigator.of(context).pushNamed(SavedKaraokeScreen.routeName),
-              child: Text(context.l10n.karaokeSavedLibrary),
-            ),
-            TextButton(
-              onPressed: _busy
-                  ? null
-                  : () => Navigator.of(context).push(
-                      MaterialPageRoute<void>(
-                        builder: (_) => const MashupScreen(),
-                        settings: const RouteSettings(name: MashupScreen.routeName),
-                      ),
-                    ),
-              child: Text(context.l10n.mashups),
-            ),
-          ],
+        TextButton(
+          onPressed: _busy ? null : () => Navigator.of(context).pushNamed(SavedKaraokeScreen.routeName),
+          child: Text(context.l10n.karaokeSavedLibrary),
         ),
         if (_error != null) Padding(padding: const EdgeInsets.all(12), child: Text(_error!)),
         Padding(

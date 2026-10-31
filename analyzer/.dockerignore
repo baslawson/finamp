@@ -16,8 +16,6 @@
 !hub_sync.py
 !karaoke.py
 !landmarks.py
-!mashup.py
-!mashup_worker.py
 !karaoke_proxy.py
 !karaoke_worker.py
 !loudness.py
@@ -30,8 +28,6 @@
 !test_karaoke_worker.py
 !test_landmarks.py
 !test_loudness.py
-!test_mashup.py
-!test_mashup_worker.py
 !test_server_runtime.py
 !test_structure.py
 !requirements.txt

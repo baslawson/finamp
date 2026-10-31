@@ -60,6 +60,15 @@ class KaraokeService {
 
   static final instance = KaraokeService();
   static const guideLevels = [0, 25, 50, 75, 100];
+
+  /// Mashups (1.6.81 and 1.6.82) were removed; this frees the space their saved and cached copies took.
+  static Future<void> removeRetiredMashups({List<Directory>? roots}) async {
+    for (final root in roots ?? [await getApplicationSupportDirectory(), await getTemporaryDirectory()]) {
+      final folder = Directory('${root.path}/mashups');
+      if (await folder.exists()) await folder.delete(recursive: true);
+    }
+  }
+
   final http.Client _client;
   final Future<Directory> Function() _directory;
   final Future<Directory> Function() _cacheDirectory;

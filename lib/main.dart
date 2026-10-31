@@ -172,6 +172,7 @@ import 'screens/view_selector.dart';
 import 'screens/volume_normalization_settings_screen.dart';
 import 'services/audio_service_helper.dart';
 import 'services/jellyfin_api_helper.dart';
+import 'services/karaoke_service.dart';
 import 'services/music_player_background_task.dart';
 import 'setup_logging.dart';
 
@@ -562,6 +563,7 @@ Future<void> _setupPlaybackServices() async {
   GetIt.instance.registerSingleton(serverSync);
   _optionalStartup.add('server sync', serverSync.sync);
   _optionalStartup.add('concert checks', ConcertService.initialize);
+  _optionalStartup.add('removed mashups', KaraokeService.removeRetiredMashups);
 
   if (Platform.isIOS) {
     GetIt.instance.registerSingleton<CarPlayHelper>(CarPlayHelper());

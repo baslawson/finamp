@@ -63,21 +63,14 @@ class WorkerTests(unittest.TestCase):
             self.assertEqual(mixed.shape, audio.shape)
             np.testing.assert_allclose(mixed, audio * (backing + guide_share * guide / 100), atol=4e-5)
             self.assertTrue(np.isfinite(manifest['mixes'][str(guide)]['lufs']))
-        # Only vocal karaoke keeps its guide on its own, for mashups.
-        vocals = ['vocals.flac'] if manifest['part'] == 'vocals' else []
         self.assertEqual(sorted(file.name for file in out.iterdir()),
-                         sorted(['mix-0.flac', 'mix-100.flac', 'mix-25.flac', 'mix-50.flac', 'mix-75.flac',
-                                 'progress.json', 'result.json', *vocals]))
+                         ['mix-0.flac', 'mix-100.flac', 'mix-25.flac', 'mix-50.flac', 'mix-75.flac', 'progress.json',
+                          'result.json'])
         return manifest
 
     def test_chunk_joins_preserve_samples_timing_and_guide_levels(self):
         audio, out = self.run_worker([('Instrumental', .6), ('Vocals', .4)])
-        manifest = self.assert_mixes(audio, out, .6, .4)
-        self.assertEqual(manifest['part'], 'vocals')
-        vocals, rate = sf.read(str(out / 'vocals.flac'))
-        self.assertEqual((rate, vocals.shape), (44100, audio.shape))
-        np.testing.assert_allclose(vocals, audio * .4, atol=4e-5)
-        self.assertEqual(manifest['vocals']['bytes'], (out / 'vocals.flac').stat().st_size)
+        self.assertEqual(self.assert_mixes(audio, out, .6, .4)['part'], 'vocals')
 
     def test_drumless_mixes_take_out_the_drums_and_bring_them_back_as_the_guide(self):
         audio, out = self.run_worker([('Drums', .3), ('No Drums', .7)], 'drums')

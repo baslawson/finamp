@@ -25,7 +25,7 @@ jobs:
           cache-dependency-path: |
             analyzer/requirements-loudness.txt
             analyzer/requirements-test.txt
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libchromaprint-tools libsndfile1 rubberband-cli
+      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libchromaprint-tools libsndfile1
       - run: pip install -r analyzer/requirements-loudness.txt -r analyzer/requirements-test.txt
       - name: Test isolated server behavior
         working-directory: analyzer

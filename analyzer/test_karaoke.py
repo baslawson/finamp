@@ -57,7 +57,23 @@ class KaraokeTests(unittest.TestCase):
                 k.migrate(db)
                 rows = [dict(row) for row in db.execute('SELECT * FROM jobs')]
             self.assertEqual(rows, [{'id': self.song, 'part': 'vocals', 'revision': self.revision, 'state': 'ready',
-                                     'progress': 1, 'message': 'Ready', 'queued': 5, 'seconds': 9, 'plan': None}])
+                                     'progress': 1, 'message': 'Ready', 'queued': 5, 'seconds': 9}])
+
+    def test_removed_mashup_jobs_and_their_files_are_retired(self):
+        mashup, kept = 'c' * 64, 'd' * 64
+        for revision in (mashup, kept):
+            (self.root / revision).mkdir()
+            (self.root / revision / 'mix.flac').write_bytes(b'mix')
+        with k.connect() as db:
+            for song, part, revision, state in ((f"{self.song}+{'e' * 32}", 'mashup', mashup, 'queued'),
+                                                (f"{'f' * 32}+{self.song}", 'mashup', kept, 'ready'),
+                                                (self.song, 'vocals', kept, 'ready')):
+                db.execute('INSERT INTO jobs (id,part,revision,state) VALUES (?,?,?,?)', (song, part, revision, state))
+            k.migrate(db)
+            rows = [tuple(row) for row in db.execute('SELECT id,part FROM jobs')]
+        self.assertEqual(rows, [(self.song, 'vocals')])
+        self.assertFalse((self.root / mashup).exists())
+        self.assertTrue((self.root / kept / 'mix.flac').exists())
 
     def test_a_failed_conversion_leaves_the_old_table_whole(self):
         with tempfile.TemporaryDirectory() as temp, patch.object(k, 'ROOT', Path(temp)):
@@ -574,199 +590,6 @@ class KaraokeTests(unittest.TestCase):
             runtime.release.assert_called_once()
             with k.connect() as db:
                 self.assertEqual(db.execute('SELECT state FROM jobs WHERE id=?', (self.song,)).fetchone()[0], 'failed')
-
-
-class MashupJobTests(unittest.TestCase):
-    PLAN = {'version': 1, 'tempo': 0.975, 'semitones': -2, 'key': 'same', 'score': 0.4, 'warnings': [],
-            'vocals': {'firstBeat': 0.3, 'period': 0.4878, 'duration': 200, 'intro': 8},
-            'backing': {'firstBeat': 0.25, 'period': 0.5, 'duration': 210, 'intro': 9, 'end': 209}}
-
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
-        patches = [patch.object(k, 'ROOT', self.root),
-                   patch.object(k, 'source_for', side_effect=lambda song, part='vocals': (
-                       self.root / f'{song}.flac', self.revisions[song]))]
-        for value in patches:
-            value.start()
-            self.addCleanup(value.stop)
-        self.addCleanup(self.temp.cleanup)
-        self.singer, self.band = 'a' * 32, 'c' * 32
-        self.revisions = {self.singer: 'b' * 64, self.band: 'd' * 64}
-        with k.connect() as db:
-            k.migrate(db)
-        k.REVISIONS.clear()
-
-    def queue(self, plan=None):
-        return k.enqueue_mashup(self.singer, self.band, k.MashupRequest(plan=plan or self.PLAN))
-
-    def karaoke(self, song, vocals=True):
-        """A ready vocal karaoke of [song], with its vocals on their own when made since mashups."""
-        revision = self.revisions[song]
-        k.enqueue(song)
-        directory = self.root / revision
-        directory.mkdir()
-        manifest = {'mixes': {g: {'bytes': 4, 'version': 1, 'lufs': -14, 'truePeak': -1} for g in k.GUIDES},
-                    'seconds': 1}
-        for guide in k.GUIDES:
-            (directory / f'mix-{guide}.flac').write_bytes(song[:2].encode() + b'm' + guide[0].encode())
-        if vocals:
-            (directory / 'vocals.flac').write_bytes(song[:2].encode() + b'vv')
-            manifest['vocals'] = {'bytes': 4}
-        (directory / 'result.json').write_text(json.dumps(manifest))
-        k.update(song, revision, state='ready', progress=1)
-
-    def work(self, succeed=True, elapsed=(0,)):
-        """Runs the queued mashup with a worker that succeeds or fails, returning its command and what it was given."""
-        seen = {}
-        revision = k.job_status(f'{self.singer}+{self.band}', part=k.MASHUP)['revision']
-        destination = self.root / revision
-
-        def start(command, **_):
-            seen['job'] = json.loads((destination / 'job.json').read_text())
-            seen['files'] = {file.name: file.read_bytes() for file in destination.glob('*-in.flac')}
-            (destination / 'singer').mkdir()
-            (destination / 'singer' / 'guide.wav').write_bytes(b'x')
-            if succeed:
-                (destination / 'mashup.flac').write_bytes(b'mash')
-                (destination / 'result.json').write_text(json.dumps({'mixes': {'mashup': {
-                    'bytes': 4, 'version': 1, 'lufs': -14, 'truePeak': -1}}, 'seconds': 3, 'part': 'mashup',
-                    'placement': {'offset': 3.75, 'vocalEntry': 6.0}}))
-            process = Mock(returncode=0 if succeed else 1)
-            process.poll.side_effect = [None] * (len(elapsed) - 1) + [process.returncode] * 9
-            return process
-        clock = iter(elapsed)
-        stop = Mock()
-        stop.wait.return_value = False
-        with patch.object(k.subprocess, 'run', return_value=Mock(stdout='{"format": {"duration": "200"}}')), \
-                patch.object(k.shutil, 'disk_usage', return_value=Mock(free=10 * 1024 ** 3)), \
-                patch.object(k.time, 'monotonic', side_effect=lambda: next(clock, elapsed[-1])), \
-                patch.object(k.subprocess, 'Popen', side_effect=start) as popen:
-            with ExitStack() as leases:
-                k.work_one(stop, leases)
-        return popen.call_args.args[0], seen, destination
-
-    def test_plans_out_of_bounds_are_refused(self):
-        from pydantic import ValidationError
-        for change in [{'tempo': 1.5}, {'tempo': float('nan')}, {'semitones': 7}, {'version': 2}, {'key': 'far'},
-                       {'vocals': {**self.PLAN['vocals'], 'period': 0}},
-                       {'backing': {**self.PLAN['backing'], 'end': float('inf')}}]:
-            with self.subTest(change=change), self.assertRaises(ValidationError):
-                k.MashupRequest(plan={**self.PLAN, **change})
-        with self.assertRaises(HTTPException) as caught:
-            k.enqueue_mashup(self.singer, self.singer, k.MashupRequest(plan=self.PLAN))
-        self.assertEqual(caught.exception.status_code, 400)
-        with self.assertRaises(HTTPException):
-            k.enqueue_mashup('nope', self.band, k.MashupRequest(plan=self.PLAN))
-
-    def test_queue_is_idempotent_and_a_new_plan_or_original_is_a_new_mashup(self):
-        first = self.queue()
-        self.assertEqual((first['state'], first['part'], first['vocals'], first['backing']),
-                         ('queued', 'mashup', self.singer, self.band))
-        self.assertEqual(first['plan']['semitones'], -2)
-        self.assertEqual(self.queue()['revision'], first['revision'])
-        self.assertNotEqual(self.queue({**self.PLAN, 'semitones': -1})['revision'], first['revision'])
-        self.revisions[self.band] = 'e' * 64
-        self.assertNotEqual(k.mashup_revision(f'{self.singer}+{self.band}', self.PLAN), first['revision'])
-        # Reversing the pair is another mashup.
-        self.assertNotEqual(k.pair_of(self.band, self.singer), k.pair_of(self.singer, self.band))
-
-    def test_mashups_stay_out_of_older_apps_job_lists(self):
-        self.karaoke(self.singer)
-        self.queue()
-        every = k.catalogue(offset=0, limit=50, state='', part='all')
-        self.assertEqual([item['part'] for item in every['items']], ['vocals'])
-        self.assertEqual(every['total'], 1)
-        self.assertEqual(k.catalogue(offset=0, limit=50, state='')['total'], 1)
-        mashups = k.catalogue(offset=0, limit=50, state='', part='mashup')
-        self.assertEqual([(item['id'], item['vocals']) for item in mashups['items']],
-                         [(f'{self.singer}+{self.band}', self.singer)])
-        with self.assertRaises(HTTPException):
-            k.statuses(k.StatusRequest(ids=[self.singer], part='mashup'))
-
-    def test_cached_karaoke_is_reused_without_separating_again(self):
-        self.karaoke(self.singer)
-        self.karaoke(self.band)
-        self.queue()
-        command, seen, destination = self.work()
-        self.assertTrue(command[1].endswith('mashup_worker.py'))
-        self.assertEqual(Path(command[2]), destination)
-        self.assertEqual(seen['job']['vocals'], {'source': str(self.root / f'{self.singer}.flac'),
-                                                 'stem': 'vocals-in.flac', 'instrumental': 'vocals-backing-in.flac'})
-        self.assertEqual(seen['job']['backing'], {'source': str(self.root / f'{self.band}.flac'),
-                                                  'instrumental': 'backing-in.flac', 'vocals': 'backing-vocals-in.flac'})
-        self.assertEqual(seen['job']['plan'], self.PLAN)
-        self.assertEqual(seen['files'], {'vocals-in.flac': b'aavv', 'vocals-backing-in.flac': b'aam0',
-                                         'backing-in.flac': b'ccm0', 'backing-vocals-in.flac': b'ccvv'})
-        status = k.mashup_status(self.singer, self.band)
-        self.assertEqual((status['state'], status['mixes']['mashup']['bytes']), ('ready', 4))
-        self.assertEqual(status['placement']['offset'], 3.75)
-        self.assertEqual(k.mashup_audio(self.singer, self.band, status['revision']).path, destination / 'mashup.flac')
-        with self.assertRaises(HTTPException):
-            k.mashup_audio(self.singer, self.band, 'f' * 64)
-        # The mashup's own copies are the worker's to clean up; the karaoke it came from is left as it was.
-        self.assertEqual(k.status(self.singer)['state'], 'ready')
-
-    def test_karaoke_from_before_mashups_has_its_vocals_separated_again(self):
-        self.karaoke(self.singer, vocals=False)
-        self.karaoke(self.band, vocals=False)
-        self.queue()
-        _, seen, _ = self.work()
-        self.assertEqual(seen['job']['vocals'], {'source': str(self.root / f'{self.singer}.flac')})
-        self.assertEqual(seen['job']['backing'], {'source': str(self.root / f'{self.band}.flac'),
-                                                  'instrumental': 'backing-in.flac'})
-
-    def test_without_karaoke_both_songs_are_separated_and_get_time_for_it(self):
-        self.queue()
-        _, seen, _ = self.work(elapsed=(0, 7199, 7199))
-        self.assertEqual(set(seen['job']['vocals']), {'source'})
-        self.assertEqual(set(seen['job']['backing']), {'source'})
-        self.assertEqual(k.mashup_status(self.singer, self.band)['state'], 'ready')
-        k.delete_mashup(self.singer, self.band)
-        self.queue()
-        self.work(succeed=False, elapsed=(0, 7201))
-        self.assertEqual(k.mashup_status(self.singer, self.band)['message'], 'Preparation interrupted; tap Prepare to retry')
-
-    def test_a_failed_mashup_cleans_up_its_separations(self):
-        self.queue()
-        _, _, destination = self.work(succeed=False)
-        status = k.mashup_status(self.singer, self.band)
-        self.assertEqual((status['state'], status['message']),
-                         ('failed', 'Making the mashup failed; the server may need more memory'))
-        self.assertEqual(sorted(file.name for file in destination.iterdir()), ['worker.log'])
-
-    def test_a_changed_original_retires_the_ready_mashup_and_delete_removes_it(self):
-        self.queue()
-        _, _, destination = self.work()
-        revision = k.mashup_status(self.singer, self.band)['revision']
-        self.revisions[self.singer] = 'f' * 64
-        self.assertEqual(k.mashup_status(self.singer, self.band)['state'], 'missing')
-        with self.assertRaises(HTTPException):
-            k.delete_mashup(self.singer, self.band, 'e' * 64)
-        self.assertEqual(k.delete_mashup(self.singer, self.band, revision), {'state': 'missing', 'part': 'mashup'})
-        self.assertFalse(destination.exists())
-
-    def test_mashup_routes_are_authenticated_and_proxied(self):
-        for path in ['/mashup/{vocals}/{backing}', '/mashup/{vocals}/{backing}/audio']:
-            for route in [r for r in k.app.routes if getattr(r, 'path', '') == path]:
-                self.assertIn(k.authorize, [d.call for d in route.dependant.dependencies])
-        import karaoke_proxy
-        authorize = lambda: None
-        routes = karaoke_proxy.router(authorize)
-        route = next(r for r in routes.routes if r.path == '/mashup/{vocals}/{backing}/audio')
-        self.assertIn(authorize, [d.call for d in route.dependant.dependencies])
-        upstream = Mock(status_code=200, headers={'Content-Length': '4', 'Content-Type': 'audio/flac'})
-        upstream.iter_content.return_value = [b'mash']
-        request = Mock(method='GET', query_params={'revision': 'f' * 64}, headers={'range': 'bytes=0-'})
-        request.url.path = f'/mashup/{self.singer}/{self.band}/audio'
-        with patch.dict('os.environ', {'KARAOKE_URL': 'http://worker:8788', 'ANALYZER_TOKEN': 'test-secret'}), \
-             patch.object(karaoke_proxy.requests, 'request', return_value=upstream) as send:
-            response = route.endpoint(self.singer, self.band, request)
-        self.assertEqual(send.call_args.args, ('GET', f'http://worker:8788/mashup/{self.singer}/{self.band}/audio'))
-        self.assertEqual(send.call_args.kwargs['headers'], {'X-Api-Key': 'test-secret', 'Range': 'bytes=0-'})
-        self.assertEqual(response.headers['content-length'], '4')
-        with self.assertRaises(HTTPException):
-            route.endpoint(self.singer, self.singer, request)
 
 
 if __name__ == '__main__': unittest.main()

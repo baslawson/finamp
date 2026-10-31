@@ -18,26 +18,21 @@ def stem_file(stem):
     return 'part-' + stem.lower().replace(' ', '-')
 
 
-def report(folder, progress):
-    """Writes progress.json for the server to show, whole or not at all."""
-    temp = Path(folder) / 'progress.tmp'
-    temp.write_text(json.dumps(progress))
-    temp.replace(Path(folder) / 'progress.json')
-
-
-_single_threaded = False
-
-
-def single_threaded():
-    """Keeps the models to one thread. ORT otherwise creates a pool for every visible VM core, despite the container
-    CPU quota."""
-    global _single_threaded
-    if _single_threaded:
-        return
+def prepare(source, destination, models, model, chunk_seconds=60, overlap_seconds=2, part='vocals'):
+    """`model` names one model per pass, comma-separated. A song whose vocals are already out needs only the last."""
+    passes = model.split(',')
+    removed_stems = REMOVED[part][-len(passes):]
+    if len(passes) != len(removed_stems):
+        raise RuntimeError('Too many separation models for this part')
+    started = time.monotonic()
     import onnxruntime as ort
+    import numpy as np
+    import soundfile as sf
     import torch
+    from audio_separator.separator import Separator
 
     torch.set_num_threads(1)
+    # ORT otherwise creates a pool for every visible VM core, despite the container CPU quota.
     original_session = ort.InferenceSession
 
     def session(path, sess_options=None, **kwargs):
@@ -47,24 +42,6 @@ def single_threaded():
         return original_session(path, sess_options=options, **kwargs)
 
     ort.InferenceSession = session
-    _single_threaded = True
-
-
-def split(source, destination, models, model, part='vocals', chunk_seconds=60, overlap_seconds=2, span=(.1, .65),
-          label=''):
-    """Separates [source] into destination/backing.wav and destination/guide.wav (the last part removed), reporting
-    progress from span[0] to span[0] + span[1] in the folder above when [label] (which ends the message) is given,
-    else in [destination]. `model` names one model per pass, comma-separated. A song whose vocals are already out
-    needs only the last."""
-    passes = model.split(',')
-    removed_stems = REMOVED[part][-len(passes):]
-    if len(passes) != len(removed_stems):
-        raise RuntimeError('Too many separation models for this part')
-    import numpy as np
-    import soundfile as sf
-    from audio_separator.separator import Separator
-
-    single_threaded()
     destination = Path(destination)
     destination.mkdir(parents=True, exist_ok=True)
     backing, guide_part = destination / "backing.wav", destination / "guide.wav"
@@ -130,9 +107,11 @@ def split(source, destination, models, model, part='vocals', chunk_seconds=60, o
                             tails[name] = data[-overlap:].copy()
                     piece.unlink()
                     done = (start + len(samples)) / len(audio)
-                    progress = {'progress': span[0] + span[1] * (step + done) / len(passes),
-                                'message': f'Separating {stem.lower()}{label} ({round(100 * done)}%)'}
-                    report(destination.parent if label else destination, progress)
+                    progress = {'progress': .1 + .65 * (step + done) / len(passes),
+                                'message': f'Separating {stem.lower()} ({round(100 * done)}%)'}
+                    temp = destination / 'progress.tmp'
+                    temp.write_text(json.dumps(progress))
+                    temp.replace(destination / 'progress.json')
                     if last:
                         break
                     start += chunk - overlap
@@ -145,55 +124,32 @@ def split(source, destination, models, model, part='vocals', chunk_seconds=60, o
         # The next pass works on what this one left; only the last pass's stem comes back as the guide.
         backing.replace(decoded)
     decoded.replace(backing)
-    return backing, guide_part
-
-
-def encode(source, output, filters=None):
-    """[source] as 16-bit stereo FLAC, through ffmpeg [filters] (-af or -filter_complex arguments) if given."""
-    command = ["ffmpeg", "-v", "error", "-nostdin", "-y", *source, *(filters or [])]
-    command += ["-ar", "44100", "-ac", "2", "-c:a", "flac", "-sample_fmt", "s16", str(output)]
-    subprocess.run(command, check=True, capture_output=True, timeout=300)
-
-
-def loudness(path):
-    """Integrated loudness and true peak, as the app's loudness matching reads them."""
-    meter = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-nostdin", "-i", str(path), "-af",
-         "loudnorm=I=-14:TP=-1:LRA=11:print_format=json", "-f", "null", "-"],
-        check=True, capture_output=True, text=True, timeout=300,
-    ).stderr
-    result = json.JSONDecoder().raw_decode(meter[meter.rfind("{"):])[0]
-    return float(result["input_i"]), float(result["input_tp"])
-
-
-def prepare(source, destination, models, model, chunk_seconds=60, overlap_seconds=2, part='vocals'):
-    started = time.monotonic()
-    destination = Path(destination)
-    backing, guide_part = split(source, destination, models, model, part, chunk_seconds, overlap_seconds)
     mixes = {}
     for guide in (0, 25, 50, 75, 100):
         # Both model outputs share the original timeline. No silence trimming, tempo changes, or lossy encoder delay.
-        inputs = ["-i", str(backing)]
+        command = ["ffmpeg", "-v", "error", "-nostdin", "-y", "-i", str(backing)]
         if guide:
-            inputs += ["-i", str(guide_part)]
-            filters = ["-filter_complex",
-                       f"[1:a]volume={guide / 100}[v];[0:a][v]amix=inputs=2:normalize=0:duration=first,"
-                       "alimiter=limit=0.891251:level=false:latency=true[a]", "-map", "[a]"]
+            command += ["-i", str(guide_part), "-filter_complex",
+                        f"[1:a]volume={guide / 100}[v];[0:a][v]amix=inputs=2:normalize=0:duration=first,"
+                        "alimiter=limit=0.891251:level=false:latency=true[a]", "-map", "[a]"]
         else:
-            filters = ["-af", "alimiter=limit=0.891251:level=false:latency=true"]
+            command += ["-af", "alimiter=limit=0.891251:level=false:latency=true"]
         output = destination / f"mix-{guide}.flac"
-        encode(inputs, output, filters)
-        lufs, peak = loudness(output)
-        mixes[str(guide)] = {"version": 1, "lufs": lufs, "truePeak": peak, "bytes": output.stat().st_size}
+        command += ["-ar", "44100", "-ac", "2", "-c:a", "flac", "-sample_fmt", "s16", str(output)]
+        subprocess.run(command, check=True, capture_output=True, timeout=300)
+        meter = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-nostdin", "-i", str(output), "-af",
+             "loudnorm=I=-14:TP=-1:LRA=11:print_format=json", "-f", "null", "-"],
+            check=True, capture_output=True, text=True, timeout=300,
+        ).stderr
+        result = json.JSONDecoder().raw_decode(meter[meter.rfind("{"):])[0]
+        mixes[str(guide)] = {"version": 1, "lufs": float(result["input_i"]),
+                             "truePeak": float(result["input_tp"]), "bytes": output.stat().st_size}
         if not all(__import__('math').isfinite(mixes[str(guide)][key]) for key in ['lufs', 'truePeak']):
             raise RuntimeError("The separated song is silent or invalid")
-    manifest = {"mixes": mixes, "seconds": round(time.monotonic() - started, 2), "model": model, "part": part}
-    if part == 'vocals':
-        # The singing on its own, for mashups that put it over another song's instrumental.
-        encode(["-i", str(guide_part)], destination / "vocals.flac")
-        manifest["vocals"] = {"bytes": (destination / "vocals.flac").stat().st_size}
     backing.unlink()
     guide_part.unlink()
+    manifest = {"mixes": mixes, "seconds": round(time.monotonic() - started, 2), "model": model, "part": part}
     (destination / "result.json").write_text(json.dumps(manifest))
 
 

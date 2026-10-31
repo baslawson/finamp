@@ -52,6 +52,22 @@ void main() {
     expect(requests, 2);
   });
 
+  test('copies left by the removed mashups are deleted and karaoke is kept', () async {
+    final support = Directory(path.join(directory.path, 'support')), temp = Directory(path.join(directory.path, 'tmp'));
+    for (final file in [
+      'support/mashups/offline/x/mix.flac',
+      'tmp/mashups/cache/y/mix.flac',
+      'support/karaoke/z/mix.flac',
+    ]) {
+      await File(path.join(directory.path, file)).create(recursive: true);
+    }
+    await KaraokeService.removeRetiredMashups(roots: [support, temp]);
+    await KaraokeService.removeRetiredMashups(roots: [support, temp]);
+    expect(Directory(path.join(support.path, 'mashups')).existsSync(), isFalse);
+    expect(Directory(path.join(temp.path, 'mashups')).existsSync(), isFalse);
+    expect(File(path.join(support.path, 'karaoke/z/mix.flac')).existsSync(), isTrue);
+  });
+
   test('cached playback needs no network and explicit offline saving copies the cached mix', () async {
     final job = KaraokeJob.fromJson(ready());
     final cached = await service.download(song, job, 0);

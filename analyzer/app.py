@@ -34,7 +34,6 @@ from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 import genre_fit as genre_fit_scoring
 import landmarks
-import mashup
 from loudness import LoudnessIndex
 import structure
 from hub import Hub, create_app as create_hub_app
@@ -734,75 +733,6 @@ def similar(id: str, limit: int = 50):
         scores = INDEX.embeddings @ INDEX.embeddings[position]
     best = [i for i in np.argsort(-scores) if ids[i] != track_id][: max(1, min(limit, 500))]
     return [{"id": ids[i], "score": round(float(scores[i]), 4)} for i in best]
-
-
-MASHUP_FIELDS = {"bpm": "bpm", "beat_bpm": "beatBpm", "key": "key", "energy": "energy", "duration": "duration",
-                 "intro": "intro", "end_time": "end", "first_beat": "firstBeat", "last_beat": "lastBeat"}
-
-
-def mashup_tracks(ids=None):
-    """What mashups need of each analysed song ([ids], or every song), by id."""
-    query = f"SELECT id, {', '.join(MASHUP_FIELDS)} FROM tracks WHERE error IS NULL AND key IS NOT NULL"
-    if ids is not None:
-        query += f" AND id IN ({','.join('?' * len(ids))})"
-    with _db_lock:
-        rows = DB.execute(query, list(ids or [])).fetchall()
-    return {row[0]: dict(zip(MASHUP_FIELDS.values(), row[1:])) for row in rows}
-
-
-def mashup_plan(vocals: str, backing: str) -> dict:
-    """The plan for a pair picked by hand: wider limits than suggestions, with warnings past them."""
-    from karaoke import pair_of
-    vocals, backing = pair_of(vocals, backing).split("+")
-    tracks = mashup_tracks([vocals, backing])
-    if vocals not in tracks or backing not in tracks:
-        raise HTTPException(status_code=404, detail="One of the songs hasn't been analysed yet")
-    try:
-        return mashup.plan(tracks[vocals], tracks[backing], suggest=False)
-    except ValueError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from None
-
-
-@app.get("/mashup-partners/{song}", dependencies=[Depends(authorize)])
-def mashup_partners(song: str, role: str = "vocals", limit: int = 20):
-    """Songs that mash up well with [song], best first: with role "vocals" it sings over theirs, with "backing" they
-    sing over it."""
-    from karaoke import track_id
-    song = track_id(song)
-    if role not in ("vocals", "backing"):
-        raise HTTPException(status_code=400, detail="Choose vocals or backing")
-    tracks = mashup_tracks()
-    if song not in tracks:
-        raise HTTPException(status_code=404, detail="That song hasn't been analysed yet")
-    return mashup.partners(song, tracks, role, max(1, min(limit, 100)))
-
-
-# Each seed scans the library twice (about 0.1 s each for 10,000 songs).
-MAX_IDEA_SEEDS = 12
-
-
-@app.get("/mashup-ideas", dependencies=[Depends(authorize)])
-def mashup_ideas(songs: str, limit: int = 20):
-    """Mashups worth trying, best first, each with one of [songs] (comma separated, such as the ones played lately)
-    singing or backing."""
-    from karaoke import track_id
-    seeds = [track_id(song) for song in songs.split(",") if song.strip()][:MAX_IDEA_SEEDS]
-    return mashup.ideas(seeds, mashup_tracks(), max(1, min(limit, 50)))
-
-
-@app.get("/mashup/{vocals}/{backing}/plan", dependencies=[Depends(authorize)])
-def mashup_preview(vocals: str, backing: str):
-    """Whether the pair can be mashed up, and how; nothing is queued."""
-    return mashup_plan(vocals, backing)
-
-
-@app.post("/mashup/{vocals}/{backing}", dependencies=[Depends(authorize)], status_code=202)
-def queue_mashup(vocals: str, backing: str, request: Request):
-    """Queues the mashup on the karaoke worker with the analyzer's plan for it."""
-    from karaoke_proxy import forward
-    plan = mashup_plan(vocals, backing)
-    return forward(request, f"/mashup/{vocals.replace('-', '').lower()}/{backing.replace('-', '').lower()}",
-                   {"plan": plan})
 
 
 class GenreFitRequest(BaseModel):

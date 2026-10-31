@@ -352,7 +352,8 @@ class Jobs:
         candidates, total = [], 0
         counted = set()
         for value, version, kind in rows:
-            if not re.fullmatch('[0-9a-f]{64}', version):
+            # Removed mashups stay until the karaoke server's migration retires them; their IDs are song pairs.
+            if kind not in ('vocals', 'drums', 'both') or not re.fullmatch('[0-9a-f]{64}', version):
                 continue
             directory = (root / version).resolve()
             if directory.parent != root.resolve() or not directory.is_dir() or (root / version).is_symlink():
@@ -376,13 +377,9 @@ class Jobs:
             if not expired and not over_budget:
                 continue
             # Vocal deletions stay as they were, so a karaoke server from before drum removal still accepts them.
-            params = {'revision': version} if kind in ('vocals', 'mashup') else {'revision': version, 'part': kind}
+            params = {'revision': version} if kind == 'vocals' else {'revision': version, 'part': kind}
             try:
-                if kind == 'mashup':
-                    vocals, backing = value.split('+')
-                    self.hub.karaoke('DELETE', f'/mashup/{song_id(vocals)}/{song_id(backing)}', params=params)
-                else:
-                    self.hub.karaoke('DELETE', f'/karaoke/{song_id(value)}', params=params)
+                self.hub.karaoke('DELETE', f'/karaoke/{song_id(value)}', params=params)
             except HTTPException as error:
                 if error.status_code in (404, 409):
                     continue
