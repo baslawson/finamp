@@ -1,0 +1,37 @@
+name: Keep five release versions
+
+on:
+  workflow_run:
+    workflows: ["Release Finamp+"]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: read
+
+concurrency:
+  group: release-retention
+  cancel-in-progress: false
+
+jobs:
+  trim:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+          fetch-depth: 0
+      - name: Test release retention
+        run: node --test test/release_retention_test.js test/release_history_test.js
+      - name: Retain five releases, tags and their history
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { pruneReleases } = require('./.github/scripts/release-retention.cjs');
+            const { trimReleaseHistory } = require('./.github/scripts/release-history.cjs');
+            const repository = (await github.rest.repos.get(context.repo)).data;
+            await pruneReleases({ github, ...context.repo, keep: 5, log: core.info });
+            await trimReleaseHistory({ github, ...context.repo, branch: repository.default_branch,
+              currentRunId: context.runId, obsoleteBranches: ['redesign'], keep: 5, log: core.info });
