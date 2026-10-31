@@ -23,6 +23,8 @@ class ServerHubScreen extends StatefulWidget {
 class _ServerHubScreenState extends State<ServerHubScreen> {
   ServerHubService? _hub;
   Map<String, dynamic>? _status, _sync, _room;
+  // The rooms open on the server, which outlive this screen: leaving it mustn't lose the way to stop a TV.
+  List<Map<String, dynamic>> _rooms = [];
   List<dynamic> _historyItems = [];
   bool _loading = true, _busy = false, _enabled = true;
   String? _error;
@@ -39,10 +41,14 @@ class _ServerHubScreenState extends State<ServerHubScreen> {
       final status = Map<String, dynamic>.from(await hub.request('GET', '/api/status') as Map);
       final sync = Map<String, dynamic>.from(await hub.request('GET', '/api/sync') as Map);
       final items = await hub.request('GET', '/api/sync/items') as List;
+      final rooms = [
+        for (final room in await hub.request('GET', '/api/rooms') as List) Map<String, dynamic>.from(room as Map),
+      ];
       final enabled = await ServerSyncService.enabled();
       if (!mounted) return;
       setState(() {
-        if (_hub?.scope != hub.scope) _room = null;
+        if (_hub?.scope != hub.scope || !rooms.any((room) => room['id'] == _room?['id'])) _room = null;
+        _rooms = rooms;
         _hub = hub;
         _status = status;
         _sync = sync;
@@ -80,6 +86,25 @@ class _ServerHubScreenState extends State<ServerHubScreen> {
       }
     } finally {
       if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  /// Fresh links for one of the open rooms: the TV's, the phone remote's and a new pairing code.
+  Future<Map<String, dynamic>> _links(String room) async =>
+      Map<String, dynamic>.from(await _hub!.request('POST', '/api/rooms/$room/links') as Map);
+
+  Future<void> _closeRoom(String room) async {
+    try {
+      await _hub!.request('DELETE', '/api/rooms/$room');
+    } on ServerHubException catch (error) {
+      // Already closed or expired: either way it's gone.
+      if (error.status != 404) rethrow;
+    }
+    if (mounted) {
+      setState(() {
+        _rooms.removeWhere((open) => open['id'] == room);
+        if (_room?['id'] == room) _room = null;
+      });
     }
   }
 
@@ -238,46 +263,83 @@ class _ServerHubScreenState extends State<ServerHubScreen> {
                               final room = Map<String, dynamic>.from(
                                 await _hub!.request('POST', '/api/rooms', body: {'name': 'Karaoke party'}) as Map,
                               );
-                              if (mounted) setState(() => _room = room);
+                              if (mounted) {
+                                setState(() {
+                                  _room = room;
+                                  _rooms = [
+                                    ..._rooms,
+                                    {'id': room['id'], 'name': room['name']},
+                                  ];
+                                });
+                              }
                             }),
                       child: const Text('Create room'),
                     ),
                   ),
-                  if (_room != null) ...[
-                    Text('Pairing code: ${_room!['code']}', style: Theme.of(context).textTheme.headlineSmall),
-                    SelectableText('${_hub!.url}/hub/tv/'),
-                    const Text(
-                      'Open that address on the TV and enter the code, or scan this QR code. The code lasts ten minutes.',
-                    ),
-                    Center(
-                      child: QrImageView(
-                        data: _hub!.page('tv', _room!['screen'] as String).toString(),
-                        size: 200,
-                        backgroundColor: Colors.white,
-                      ),
+                  for (final open in _rooms) ...[
+                    ListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(open['name'] as String? ?? 'Karaoke party'),
+                      subtitle: const Text('Open on the server'),
                     ),
                     Wrap(
                       spacing: 8,
                       children: [
                         OutlinedButton(
-                          onPressed: () => _run(() => _open('remote', _room!['control'] as String)),
+                          onPressed: _busy
+                              ? null
+                              : () => _run(
+                                  () async =>
+                                      _open('remote', (await _links(open['id'] as String))['control'] as String),
+                                ),
                           child: const Text('Phone remote'),
                         ),
-                        TextButton(
-                          onPressed: () => Clipboard.setData(
-                            ClipboardData(text: _hub!.page('tv', _room!['screen'] as String).toString()),
-                          ),
-                          child: const Text('Copy TV link'),
+                        OutlinedButton(
+                          onPressed: _busy
+                              ? null
+                              : () => _run(() async {
+                                  final messenger = ScaffoldMessenger.of(context);
+                                  await _hub!.request('POST', '/api/rooms/${open['id']}/stop');
+                                  messenger.showSnackBar(const SnackBar(content: Text('The TV is paused')));
+                                }),
+                          child: const Text('Stop TV'),
                         ),
+                        if (_room?['id'] != open['id'])
+                          TextButton(
+                            onPressed: _busy
+                                ? null
+                                : () => _run(() async {
+                                    final links = await _links(open['id'] as String);
+                                    if (mounted) setState(() => _room = links);
+                                  }),
+                            child: const Text('Pairing code'),
+                          ),
                         TextButton(
-                          onPressed: () => _run(() async {
-                            await _hub!.request('DELETE', '/api/rooms/${_room!['id']}');
-                            if (mounted) setState(() => _room = null);
-                          }),
+                          onPressed: _busy ? null : () => _run(() => _closeRoom(open['id'] as String)),
                           child: const Text('Close room'),
                         ),
                       ],
                     ),
+                    if (_room?['id'] == open['id']) ...[
+                      Text('Pairing code: ${_room!['code']}', style: Theme.of(context).textTheme.headlineSmall),
+                      SelectableText('${_hub!.url}/hub/tv/'),
+                      const Text(
+                        'Open that address on the TV and enter the code, or scan this QR code. The code lasts ten minutes.',
+                      ),
+                      Center(
+                        child: QrImageView(
+                          data: _hub!.page('tv', _room!['screen'] as String).toString(),
+                          size: 200,
+                          backgroundColor: Colors.white,
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () => Clipboard.setData(
+                          ClipboardData(text: _hub!.page('tv', _room!['screen'] as String).toString()),
+                        ),
+                        child: const Text('Copy TV link'),
+                      ),
+                    ],
                   ],
                   const Divider(height: 32),
                   SwitchListTile(

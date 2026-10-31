@@ -30,7 +30,7 @@ async function api(path, method = 'GET', data, capability = token, extra = {}) {
     if (!response.ok) {
       let message = 'Server request failed';
       try { const error = await response.json(); if (typeof error.detail === 'string') message = error.detail; } catch (_) {}
-      throw new Error(message);
+      const failure = new Error(message); failure.status = response.status; throw failure;
     }
     document.getElementById('connection').textContent = 'Connected';
     return await response.json();
@@ -244,6 +244,17 @@ async function syncAdmin() {
 }
 function debounce(action) { let timer; return()=>{clearTimeout(timer);timer=setTimeout(()=>act(action),350);}; }
 function failed(error) { document.getElementById('connection').textContent='Disconnected'; root.replaceChildren(el('h1','Open your server hub from Finamp'),el('p',error.message||'This link may have expired.','muted'),el('p','Settings → Server hub → Open server controls')); }
+// The room was closed (or expired, or its link replaced): there is nothing left to wait for.
+function roomGone(error) { return [401, 403, 404].includes(error?.status); }
+function leaveRoom(message) {
+  clearTimeout(pollTimer); token = ''; roomState = undefined;
+  armed = false; mediaKey = ''; appliedRevision = -1; lyrics = []; lyricsKey = ''; lyricsSong = '';
+  try { sessionStorage.removeItem(`finamp.hub.${page}`); } catch (_) {}
+  if (tvAudio) { tvAudio.onerror = tvAudio.onended = tvAudio.ontimeupdate = null; tvAudio.pause(); tvAudio.removeAttribute('src'); tvAudio.load(); tvAudio = undefined; }
+  document.body.classList.remove('tv'); document.getElementById('connection').textContent = 'Room closed';
+  if (page === 'tv') showPairing(); else root.replaceChildren(el('h1','This karaoke room was closed'),el('p',message,'muted'));
+  notice('This karaoke room was closed');
+}
 function welcome() { root.replaceChildren(el('h1','Your music server, connected'),el('p','Open Finamp → Settings → Server hub to manage Radio, TV karaoke, overnight jobs, audio health and backups.','muted'),button('Connect a TV screen',()=>location.assign(base+'/tv/'))); }
 
 let tvAudio, tvStart, armed=false, mediaKey='', appliedRevision=-1, lyrics=[], lastLine=-2, tvStatus, tvTitle, tvArtist, lyricBox, progress, qrImage, lastReport=0;
@@ -270,7 +281,7 @@ async function tvPoll() {
     if(state.guestToken&&qrImage.dataset.token!==state.guestToken){qrImage.dataset.token=state.guestToken;const url=link('guest',state.guestToken,state.publicUrl);qrImage.src=base+'/api/room/qr?ticket='+encodeURIComponent(state.guestToken)+'&url='+encodeURIComponent(url);}
     await applyTv();renderLyrics();
     refreshLyrics(state);
-  }catch(error){document.getElementById('connection').textContent='Reconnecting';tvStatus.textContent=error.message;}
+  }catch(error){if(roomGone(error))return leaveRoom(error.message);document.getElementById('connection').textContent='Reconnecting';tvStatus.textContent=error.message;}
   pollTimer=setTimeout(tvPoll,1000);
 }
 async function refreshLyrics(state){
@@ -329,7 +340,7 @@ async function command(action,extra={}){if(!roomState)return;await api('/api/roo
 async function remotePoll(again=true){
   try{roomState=await api('/api/room/state');remoteTitle.textContent=roomState.song?.name||roomState.name;remoteStatus.textContent=roomState.message;remoteProgress.textContent=time(roomState.positionMs)+' / '+time(roomState.song?.durationMs);
     remoteQueue.replaceChildren();roomState.requests.forEach(request=>append(remoteQueue,append(el('div',null,'song'),append(el('div'),el('strong',request.title||'Karaoke request'),el('small','Requested by '+request.guest)),page==='guest'?null:button('Remove',()=>command('remove',{song:request.song}),true))));if(!roomState.requests.length)remoteQueue.append(el('p','No requests yet.','muted'));
-  }catch(error){notice(error.message);}if(again)pollTimer=setTimeout(remotePoll,1500);
+  }catch(error){if(roomGone(error))return leaveRoom(error.message);notice(error.message);}if(again)pollTimer=setTimeout(remotePoll,1500);
 }
 // A party guest: the host's phone runs the party, and the server passes requests to it, so guests needn't share its Wi-Fi.
 let partyGuest='';

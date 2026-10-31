@@ -449,6 +449,19 @@ class Hub:
         self.after_command(room, selected)
         return {'ok': True}
 
+    def stop_room(self, value, actor):
+        """Pauses the room's TV for its owner, from the app, which keeps no remote link once its screen is closed."""
+        with self.lock_for(value):
+            room = self.room(value)
+            if room['owner'] != actor.id and not actor.admin:
+                raise HTTPException(403, 'This TV room belongs to another account')
+            state = json.loads(room['state'])
+            if not state.get('playing'):
+                return {'stopped': True}
+            self._room_command(room, {'action': 'pause', 'revision': state['commandRev']})
+        self.after_command(room, None)
+        return {'stopped': True}
+
     def after_command(self, room, selected):
         # The worker and Jellyfin are contacted after the command is saved, without holding up the room.
         if selected:
@@ -846,6 +859,10 @@ def create_app(hub):
     @app.post('/api/rooms/{value}/links')
     def room_links(value: str, user=Depends(actor)):
         return hub.room_links(song_id(value), user)
+
+    @app.post('/api/rooms/{value}/stop')
+    def stop_room(value: str, user=Depends(actor)):
+        return hub.stop_room(song_id(value), user)
 
     @app.delete('/api/rooms/{value}')
     def close_room(value: str, user=Depends(actor)):

@@ -237,6 +237,21 @@ class HubTests(unittest.TestCase):
         self.assertEqual(state['requests'][0]['title'], 'Second')
         self.assertNotIn('requester', state['requests'][0])
 
+    def test_the_owner_can_stop_the_tv_without_its_remote_link(self):
+        room = self.room()
+        self.command(room, 'select', song=SONG)
+        other = {**self.headers, 'X-Jellyfin-Token': 'other'}
+        self.assertEqual(self.api('POST', f"/rooms/{room['id']}/stop", headers=other).status_code, 403)
+        self.assertEqual(self.api('POST', f"/rooms/{room['id']}/stop").json(), {'stopped': True})
+        state = self.api('GET', '/room/state', headers=self.role(room, 'screen')).json()
+        self.assertFalse(state['playing'])
+        self.assertEqual(state['song']['id'], SONG)
+        # Stopping again changes nothing, so the remote's next command still fits.
+        self.assertEqual(self.api('POST', f"/rooms/{room['id']}/stop").status_code, 200)
+        self.assertEqual(self.command(room, 'play', 2).status_code, 200)
+        self.api('DELETE', '/rooms/' + room['id'])
+        self.assertEqual(self.api('POST', f"/rooms/{room['id']}/stop").status_code, 404)
+
     def test_room_commands_reject_stale_and_preserve_seek(self):
         room = self.room()
         self.assertEqual(self.command(room, 'select', song=SONG).status_code, 200)

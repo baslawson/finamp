@@ -52,7 +52,7 @@ jobs:
         run: flutter test --reporter compact
 
       - name: Test Party guest page and release retention
-        run: node --test test/party_guest_page_test.js test/party_tv_page_test.js test/release_retention_test.js test/release_history_test.js
+        run: node --test test/party_guest_page_test.js test/party_tv_page_test.js test/hub_tv_page_test.js test/release_retention_test.js test/release_history_test.js
 
   build-android:
     name: Build signed APKs
