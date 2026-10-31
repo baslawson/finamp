@@ -19,7 +19,10 @@ class Sync:
         return hashlib.sha256(value.encode()).hexdigest()[:32]
 
     def read(self, owner, unless=''):
-        user = self.store.user(owner)
+        # Devices poll this; a known account is only read, without the store's write lock.
+        with self.store.connect() as db:
+            row = db.execute('SELECT * FROM users WHERE id=?', (owner,)).fetchone()
+        user = dict(row) if row else self.store.user(owner)
         tag = self.tag(user)
         # A device polling with the configuration it already has is told only that, without history or the queue.
         if unless and unless == tag:

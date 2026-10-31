@@ -43,8 +43,8 @@ class $AssetsFontsGen {
 class $AssetsIconGen {
   const $AssetsIconGen();
 
-  /// File path: assets/icon/icon_combined.png
-  AssetGenImage get iconCombined => const AssetGenImage('assets/icon/icon_combined.png');
+  /// File path: assets/icon/icon_preview.png
+  AssetGenImage get iconPreview => const AssetGenImage('assets/icon/icon_preview.png');
 
   /// File path: assets/icon/icon_square_bg-black.png
   AssetGenImage get iconSquareBgBlack => const AssetGenImage('assets/icon/icon_square_bg-black.png');
@@ -56,7 +56,7 @@ class $AssetsIconGen {
   AssetGenImage get iconWhiteNoborder => const AssetGenImage('assets/icon/icon_white_noborder.png');
 
   /// List of all assets
-  List<AssetGenImage> get values => [iconCombined, iconSquareBgBlack, iconSquareBgWhite, iconWhiteNoborder];
+  List<AssetGenImage> get values => [iconPreview, iconSquareBgBlack, iconSquareBgWhite, iconWhiteNoborder];
 }
 
 class $AssetsFontsOutfitGen {

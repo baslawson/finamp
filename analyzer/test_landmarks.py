@@ -67,14 +67,19 @@ def wav(samples: np.ndarray, rate: int) -> bytes:
 
 
 class LandmarkTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Made once: the songs and their landmarks take most of the time. Each test indexes them afresh.
+        cls.songs = {f't{seed}': song(seed) for seed in range(6)}
+        cls.marks = {track_id: landmarks.landmarks(samples) for track_id, samples in cls.songs.items()}
+
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory()
         self.addCleanup(self.folder.cleanup)
         self.index = LandmarkIndex(os.path.join(self.folder.name, 'landmarks.db'))
         self.addCleanup(self.index.connection.close)
-        self.songs = {f't{seed}': song(seed) for seed in range(6)}
-        for track_id, samples in self.songs.items():
-            self.index.add(track_id, 1.0, landmarks.landmarks(samples))
+        for track_id, marks in self.marks.items():
+            self.index.add(track_id, 1.0, marks)
 
     def rows(self) -> int:
         return self.index.connection.execute('SELECT count(*) FROM landmarks').fetchone()[0]
@@ -391,7 +396,12 @@ class LandmarkTests(unittest.TestCase):
         index = LandmarkIndex(os.path.join(self.folder.name, 'scan.db'))
         self.addCleanup(index.connection.close)
         analyze = unittest.mock.Mock(return_value={'bpm': 120.0})
-        indexed = unittest.mock.Mock(wraps=application.index_landmarks)
+        sizes, original = [], application.index_landmarks
+        def index_landmarks(*args):
+            sizes.append(index.connection.execute('PRAGMA cache_size').fetchone()[0])
+            return original(*args)
+        indexed = unittest.mock.Mock(side_effect=index_landmarks)
+        self.assertEqual(index.connection.execute('PRAGMA cache_size').fetchone()[0], -2000)
         with patch.object(application, 'DB', database), patch.object(application, 'LANDMARKS', index), \
                 patch.object(application, 'library_tracks', lambda: dict(tracks)), \
                 patch.object(application, 'analyze', analyze), patch.object(application, 'index_landmarks', indexed), \
@@ -401,6 +411,9 @@ class LandmarkTests(unittest.TestCase):
             # Only the new track is analyzed; both become recognizable.
             analyze.assert_called_once_with(tracks['b'])
             self.assertEqual(sorted(call.args[0] for call in indexed.call_args_list), ['a', 'b'])
+            # A large cache while the scan writes the index, and the usual one between scans.
+            self.assertEqual(sizes, [-262144, -262144])
+            self.assertEqual(index.connection.execute('PRAGMA cache_size').fetchone()[0], -2000)
             self.assertEqual(index.ids(), {'a', 'b'})
             clip = through_a_room(song(60, 20)[3 * RATE : 18 * RATE], 3)
             self.assertEqual(index.match(clip)[0], 'a')

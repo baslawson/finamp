@@ -29,6 +29,8 @@ from server_http import HttpPool, ResultCache
 
 
 class Hub:
+    ROOM_CHECK_SECONDS = 15
+
     def __init__(self, data, jellyfin, token, karaoke_url, busy=lambda: False, runtime=None):
         self.data, self.jellyfin = Path(data), jellyfin
         self.token, self.karaoke_url = token, karaoke_url.rstrip('/')
@@ -350,6 +352,7 @@ class Hub:
                 state['message'] = 'Karaoke preparation is queued'
         except HTTPException as error:
             state['message'] = str(error.detail)
+            result = {}
         store = self.store
         with store.lock, store.connect() as db:
             current = db.execute('SELECT state FROM rooms WHERE id=?', (value,)).fetchone()
@@ -362,7 +365,10 @@ class Hub:
                         latest[key] = state[key]
                 if state.get('mediaReady') and not json.loads(current[0]).get('mediaReady'):
                     latest['updated'] = time.time()
-                db.execute('UPDATE rooms SET state=? WHERE id=?', (json.dumps(latest), value))
+                # The TVs poll while a song is prepared; most polls change nothing.
+                if latest != json.loads(current[0]):
+                    db.execute('UPDATE rooms SET state=? WHERE id=?', (json.dumps(latest), value))
+        return result.get('state')
 
     def refresh_rooms(self):
         with self.store.connect() as db:
@@ -376,7 +382,15 @@ class Hub:
                 except HTTPException:
                     pass
             elif state.get('song') and not state.get('mediaReady'):
-                self.prepare_room(room['id'])
+                # A separation takes many minutes, and finished browser audio marks the room ready itself, so a song
+                # still being prepared is asked about every 15 seconds, not on every 2-second round.
+                key = (room['id'], state['song']['id'], state['commandRev'])
+                if self.room_checks.get(key, 0) > time.monotonic():
+                    continue
+                if self.prepare_room(room['id']) in ('queued', 'processing', 'ready'):
+                    if len(self.room_checks) > 256:
+                        self.room_checks.clear()
+                    self.room_checks[key] = time.monotonic() + self.ROOM_CHECK_SECONDS
 
     @staticmethod
     def idle(state):

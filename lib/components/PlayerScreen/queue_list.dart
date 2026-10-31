@@ -24,7 +24,6 @@ import 'package:finamp/menus/components/radio_mode_menu.dart';
 import 'package:finamp/screens/radio_controls_screen.dart';
 import 'package:finamp/menus/track_menu.dart';
 import 'package:finamp/models/finamp_models.dart';
-import 'package:finamp/models/jellyfin_models.dart' as jellyfin_models;
 import 'package:finamp/screens/blurred_player_screen_background.dart';
 import 'package:finamp/services/current_album_image_provider.dart';
 import 'package:finamp/services/feedback_helper.dart';
@@ -45,13 +44,6 @@ import 'package:get_it/get_it.dart';
 import 'package:rxdart/rxdart.dart';
 
 import '../../extensions/localizations.dart';
-
-class QueueListStreamState {
-  QueueListStreamState(this.mediaState, this.queueInfo);
-
-  final MediaState mediaState;
-  final FinampQueueInfo? queueInfo;
-}
 
 class QueueList extends ConsumerStatefulWidget {
   static const routeName = "/queue";
@@ -686,6 +678,10 @@ class _QueueTracksListState extends ConsumerState<QueueTracksList> {
   }
 }
 
+/// What [CurrentTrack] shows of the player: the song (and its details then, which can be swapped on the same queue
+/// item), whether it's playing and how long it is.
+typedef _CurrentTrackShown = ({FinampQueueItem? track, MediaItem? item, bool playing, Duration? duration});
+
 class CurrentTrack extends ConsumerStatefulWidget {
   const CurrentTrack({super.key});
 
@@ -702,39 +698,50 @@ class _CurrentTrackState extends ConsumerState<CurrentTrack> {
     super.initState();
     _queueService = GetIt.instance<QueueService>();
     _audioHandler = GetIt.instance<MusicPlayerBackgroundTask>();
+    // Made once, as a new stream each build subscribes again, and only with what the bar shows, so other player
+    // events (position, buffering) don't rebuild it.
+    _shown =
+        Rx.combineLatest2<MediaState, FinampQueueInfo?, _CurrentTrackShown>(
+          mediaStateStream,
+          _queueService.getQueueStream(),
+          (media, queue) => _shownFrom(media.playbackState, media.mediaItem, queue),
+        ).distinct(
+          (a, b) =>
+              identical(a.track, b.track) &&
+              identical(a.item, b.item) &&
+              a.playing == b.playing &&
+              a.duration == b.duration,
+        );
   }
+
+  late final Stream<_CurrentTrackShown> _shown;
+
+  static _CurrentTrackShown _shownFrom(PlaybackState playback, MediaItem? mediaItem, FinampQueueInfo? queue) => (
+    track: queue?.currentTrack,
+    item: queue?.currentTrack?.item,
+    playing: playback.playing,
+    duration: mediaItem?.duration,
+  );
 
   @override
   Widget build(context) {
     FinampQueueItem? currentTrack;
-    MediaState? mediaState;
     Duration? playbackPosition;
 
-    final audioHandler = GetIt.instance<MusicPlayerBackgroundTask>();
-
-    return StreamBuilder<QueueListStreamState>(
-      stream: Rx.combineLatest2<MediaState, FinampQueueInfo?, QueueListStreamState>(
-        mediaStateStream,
-        _queueService.getQueueStream(),
-        (a, b) => QueueListStreamState(a, b),
-      ),
-      initialData: QueueListStreamState(
-        MediaState(
-          audioHandler.mediaItem.value,
-          audioHandler.playbackState.value,
-          audioHandler.fadeState.value.fadeDirection,
-        ),
+    return StreamBuilder<_CurrentTrackShown>(
+      stream: _shown,
+      initialData: _shownFrom(
+        _audioHandler.playbackState.value,
+        _audioHandler.mediaItem.value,
         _queueService.getQueue(),
       ),
       builder: (context, snapshot) {
         var data = snapshot.data;
-        currentTrack = data?.queueInfo?.currentTrack;
+        currentTrack = data?.track;
         if (data != null && currentTrack != null) {
-          mediaState = data.mediaState;
+          final duration = data.duration;
 
-          final currentTrackBaseItem = jellyfin_models.BaseItemDto.fromJson(
-            currentTrack!.item.extras?["itemJson"] as Map<String, dynamic>,
-          );
+          final currentTrackBaseItem = currentTrack!.baseItem;
 
           const horizontalPadding = 8.0;
           const albumImageSize = 70.0;
@@ -795,7 +802,7 @@ class _CurrentTrackState extends ConsumerState<CurrentTrack> {
                               FeedbackHelper.feedback(FeedbackType.selection);
                               _audioHandler.togglePlayback();
                             },
-                            icon: mediaState!.playbackState.playing
+                            icon: data.playing
                                 ? const Icon(
                                     TablerIcons.player_pause,
                                     size: 32,
@@ -821,7 +828,7 @@ class _CurrentTrackState extends ConsumerState<CurrentTrack> {
                               builder: (context, snapshot) {
                                 if (snapshot.hasData) {
                                   playbackPosition = snapshot.data;
-                                  var itemLength = mediaState?.mediaItem?.duration;
+                                  var itemLength = duration;
                                   return FractionallySizedBox(
                                     alignment: AlignmentDirectional.centerStart,
                                     widthFactor: itemLength == null
@@ -926,9 +933,9 @@ class _CurrentTrackState extends ConsumerState<CurrentTrack> {
                                               const SizedBox(width: 2),
                                               Text(
                                                 // '3:44',
-                                                (mediaState?.mediaItem?.duration?.inHours ?? 0.0) >= 1.0
-                                                    ? "${mediaState?.mediaItem?.duration?.inHours.toString()}:${((mediaState?.mediaItem?.duration?.inMinutes ?? 0) % 60).toString().padLeft(2, '0')}:${((mediaState?.mediaItem?.duration?.inSeconds ?? 0) % 60).toString().padLeft(2, '0')}"
-                                                    : "${mediaState?.mediaItem?.duration?.inMinutes.toString()}:${((mediaState?.mediaItem?.duration?.inSeconds ?? 0) % 60).toString().padLeft(2, '0')}",
+                                                (duration?.inHours ?? 0.0) >= 1.0
+                                                    ? "${duration?.inHours.toString()}:${((duration?.inMinutes ?? 0) % 60).toString().padLeft(2, '0')}:${((duration?.inSeconds ?? 0) % 60).toString().padLeft(2, '0')}"
+                                                    : "${duration?.inMinutes.toString()}:${((duration?.inSeconds ?? 0) % 60).toString().padLeft(2, '0')}",
                                                 style: TextStyle(
                                                   color: primaryTextColor,
                                                   fontSize: 14,

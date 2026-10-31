@@ -5,11 +5,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-COPY requirements*.txt .
+# Only what the image installs, so changing the test requirements doesn't install torch again; downloads are kept
+# in BuildKit's cache between builds, not in the image.
+COPY requirements.txt requirements-loudness.txt ./
 ARG ADVANCED_ANALYSIS=true
-RUN if [ "$ADVANCED_ANALYSIS" = "true" ]; then \
-      pip install --no-cache-dir --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt; \
-    else pip install --no-cache-dir -r requirements-loudness.txt; fi
+RUN --mount=type=cache,target=/root/.cache/pip if [ "$ADVANCED_ANALYSIS" = "true" ]; then \
+      pip install --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt; \
+    else pip install -r requirements-loudness.txt; fi
 ENV ADVANCED_ANALYSIS=$ADVANCED_ANALYSIS
 
 COPY entrypoint.sh /entrypoint.sh

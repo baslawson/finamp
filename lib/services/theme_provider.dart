@@ -175,6 +175,33 @@ ImageProvider paletteSource(ImageProvider image) {
   return ResizeImage(file, width: 256, height: 256, policy: ResizeImagePolicy.fit, allowUpscaling: false);
 }
 
+/// Themes worked out from artwork smaller than the player's (album and artist screens), by image: the most recently
+/// used few, so going back to a screen doesn't work its colours out again.
+final _smallArtworkThemes = RecentThemes(50);
+
+@visibleForTesting
+class RecentThemes {
+  RecentThemes(this.capacity);
+
+  final int capacity;
+  final _themes = <ThemeColorRequest, RawThemeResult>{};
+
+  RawThemeResult? get(ThemeColorRequest request) {
+    final theme = _themes.remove(request);
+    // Moved to the end, as the most recently used.
+    if (theme != null) _themes[request] = theme;
+    return theme;
+  }
+
+  // Only images with a blurhash, as with the saved themes: one with just an id can change on the server.
+  void put(ThemeColorRequest request, RawThemeResult theme) {
+    if (request.blurHash == null) return;
+    _themes.remove(request);
+    _themes[request] = theme;
+    if (_themes.length > capacity) _themes.remove(_themes.keys.first);
+  }
+}
+
 @riverpod
 class FinampThemeFromImage extends _$FinampThemeFromImage {
   @override
@@ -183,7 +210,7 @@ class FinampThemeFromImage extends _$FinampThemeFromImage {
     if (theme.image == null) {
       return getGrayTheme(brightness);
     }
-    final cachedColors = _getImageTheme(theme.blurHash);
+    final cachedColors = _getImageTheme(theme.blurHash) ?? (theme.fullQuality ? null : _smallArtworkThemes.get(theme));
     if (cachedColors != null) {
       return _getColorScheme(cachedColors, brightness);
     }
@@ -214,6 +241,9 @@ class FinampThemeFromImage extends _$FinampThemeFromImage {
               // If image is downloaded but no theme is cached, and we are using the full size player image, attempt to cache value.
               _setImageTheme(theme.blurHash, colors);
               cacheProviderBriefly(ref);
+            } else {
+              // Colours from smaller artwork can differ a little, so they're only kept for this run of the app.
+              _smallArtworkThemes.put(theme, colors);
             }
             themeProviderLogger.finer("Calculated theme color ${colors.highlight} for image $image");
             return _getColorScheme(colors, brightness);

@@ -3,6 +3,8 @@ name: Release Finamp+
 # Builds a signed Android APK and publishes it as a GitHub release whenever a
 # version tag (e.g. v1.1.0) is pushed. Needs the repository secrets
 # ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS.
+# The tests and the APK build run side by side; the release is published only
+# once all of them have passed.
 on:
   push:
     tags:
@@ -25,7 +27,7 @@ jobs:
           cache-dependency-path: |
             analyzer/requirements-loudness.txt
             analyzer/requirements-test.txt
-      - run: sudo apt-get update && sudo apt-get install -y ffmpeg libchromaprint-tools libsndfile1
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg libchromaprint-tools libsndfile1
       - run: pip install -r analyzer/requirements-loudness.txt -r analyzer/requirements-test.txt
       - name: Test isolated server behavior
         working-directory: analyzer
@@ -33,20 +35,36 @@ jobs:
         env:
           DATA_DIR: ${{ runner.temp }}/finamp-server-test-data
 
-  release-android:
-    name: Build and publish signed APK
-    needs: server-tests
+  app-tests:
+    name: Test app services and web pages
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
         with:
-          # Two commits: the release notes come from the one before "Release X.Y.Z".
-          fetch-depth: 2
+          channel: stable
+          cache: true
+
+      - run: flutter pub get
+
+      - name: Test app services
+        run: flutter test --reporter compact
+
+      - name: Test Party guest page and release retention
+        run: node --test test/party_guest_page_test.js test/party_tv_page_test.js test/release_retention_test.js test/release_history_test.js
+
+  build-android:
+    name: Build signed APKs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
+          cache: gradle
 
       - uses: subosito/flutter-action@v2
         with:
@@ -69,12 +87,6 @@ jobs:
 
       - run: flutter pub get
 
-      - name: Test app services
-        run: flutter test --reporter compact
-
-      - name: Test Party guest page and release retention
-        run: node --test test/party_guest_page_test.js test/party_tv_page_test.js test/release_retention_test.js test/release_history_test.js
-
       - run: flutter build apk --release
 
       - name: Keep universal APK
@@ -90,14 +102,39 @@ jobs:
         working-directory: android
         run: ./gradlew :just_audio:testPcmAudioProcessors :app:testArtworkPolicy --console=plain
 
+      # For the release job, and the download for manual runs.
+      - name: Upload APKs
+        uses: actions/upload-artifact@v4
+        with:
+          name: finamp-plus-apk
+          path: finamp-plus-*.apk
+          if-no-files-found: error
+
+      - name: Remove signing key
+        if: always()
+        run: rm -f android/app/release.jks android/key.properties
+
+  publish:
+    name: Publish release
+    needs: [server-tests, app-tests, build-android]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Two commits: the release notes come from the one before "Release X.Y.Z".
+          fetch-depth: 2
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: finamp-plus-apk
+
       # What's new, for the release page and the app's Updates page: the feature commit before "Release X.Y.Z".
       - name: Write release notes
-        if: startsWith(github.ref, 'refs/tags/')
         run: |
           git log -1 --format=%b HEAD~1 | sed '/^Co-Authored-By:/d' > release-notes.md || true
 
       - name: Publish release
-        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
           files: |
@@ -105,14 +142,3 @@ jobs:
             finamp-plus-${{ github.ref_name }}-arm64.apk
           body_path: release-notes.md
           generate_release_notes: true
-
-      - name: Upload APK (manual runs)
-        if: "!startsWith(github.ref, 'refs/tags/')"
-        uses: actions/upload-artifact@v4
-        with:
-          name: finamp-plus-apk
-          path: finamp-plus-*.apk
-
-      - name: Remove signing key
-        if: always()
-        run: rm -f android/app/release.jks android/key.properties

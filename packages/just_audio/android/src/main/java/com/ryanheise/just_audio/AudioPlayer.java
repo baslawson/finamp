@@ -52,7 +52,6 @@ import androidx.media3.exoplayer.source.ShuffleOrder;
 import androidx.media3.exoplayer.source.ShuffleOrder.DefaultShuffleOrder;
 import androidx.media3.exoplayer.source.SilenceMediaSource; // Deprecated
 import androidx.media3.common.TrackGroup;
-import androidx.media3.exoplayer.dash.DashMediaSource; // Deprecated
 import androidx.media3.exoplayer.hls.HlsMediaSource; // Deprecated
 import androidx.media3.exoplayer.trackselection.TrackSelectionArray;
 import androidx.media3.datasource.DataSource;
@@ -137,11 +136,9 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
                 handler.postDelayed(this, 200);
                 break;
             case Player.STATE_READY:
-                if (player.getPlayWhenReady()) {
-                    handler.postDelayed(this, 500);
-                } else {
-                    handler.postDelayed(this, 1000);
-                }
+                // Finamp+: only the buffered bar uses this (position is extrapolated from each event), so once a second
+                // is enough while playing too; each event also costs a media session update.
+                handler.postDelayed(this, 1000);
                 break;
             default:
                 // Stop watching buffer
@@ -668,12 +665,9 @@ public class AudioPlayer implements MethodCallHandler, Player.Listener, Metadata
                             .setTag(id)
                             .build());
         case "dash":
-            return new DashMediaSource.Factory(buildDataSourceFactory(mapGet(map, "headers")))
-                    .createMediaSource(new MediaItem.Builder()
-                            .setUri(Uri.parse((String)map.get("uri")))
-                            .setMimeType(MimeTypes.APPLICATION_MPD)
-                            .setTag(id)
-                            .build());
+            // Finamp+ only plays files and progressive/HLS streams; the DASH module isn't bundled. Reported to Dart as
+            // a load error instead of crashing.
+            throw new IllegalArgumentException("DASH audio sources aren't supported: " + map.get("uri"));
         case "hls":
             return new HlsMediaSource.Factory(buildDataSourceFactory(mapGet(map, "headers")))
                     .createMediaSource(new MediaItem.Builder()

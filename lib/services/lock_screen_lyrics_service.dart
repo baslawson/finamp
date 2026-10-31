@@ -1,11 +1,13 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:audio_service/audio_service.dart';
 import 'package:finamp/models/jellyfin_models.dart';
 import 'package:finamp/screens/karaoke_screen.dart';
 import 'package:finamp/services/current_track_metadata_provider.dart';
 import 'package:finamp/services/metadata_provider.dart';
 import 'package:finamp/services/music_player_background_task.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:get_it/get_it.dart';
@@ -26,7 +28,7 @@ class LockScreenLyricsService {
   static bool get enabled => _enabled;
 
   static ProviderSubscription<AsyncValue<MetadataProvider?>>? _lyricsSubscription;
-  static StreamSubscription<bool>? _playingSubscription;
+  static StreamSubscription<PlaybackState>? _playingSubscription;
   static Timer? _timer;
   static List<LyricLine> _lines = const [];
   static String _title = "";
@@ -60,14 +62,8 @@ class LockScreenLyricsService {
       _update();
     }, fireImmediately: true);
     final player = GetIt.instance<MusicPlayerBackgroundTask>();
-    _playingSubscription = player.playbackState.map((state) => state.playing).distinct().listen((playing) {
-      _timer?.cancel();
-      if (playing) {
-        _timer = Timer.periodic(const Duration(milliseconds: 250), (_) => _update());
-      } else {
-        _clear();
-      }
-    });
+    // Every state: a seek or a change of speed moves the next line's time.
+    _playingSubscription = player.playbackState.listen((_) => _update());
   }
 
   static void _stop() {
@@ -81,12 +77,19 @@ class LockScreenLyricsService {
   }
 
   static void _update() {
+    _timer?.cancel();
+    _timer = null;
     final player = GetIt.instance<MusicPlayerBackgroundTask>();
-    if (_lines.isEmpty || !player.playbackState.value.playing) {
+    final state = player.playbackState.value;
+    if (_lines.isEmpty || !state.playing) {
       _clear();
       return;
     }
-    final index = KaraokeTiming.lineAt(_lines, player.playbackPosition.inMicroseconds * 10);
+    final position = player.playbackPosition.inMicroseconds * 10;
+    // Woken once for the next line, rather than checking a few times a second.
+    final wait = untilNextLine(_lines, position, state.speed);
+    if (wait != null) _timer = Timer(wait, _update);
+    final index = KaraokeTiming.lineAt(_lines, position);
     if (index == _shownIndex) return;
     _shownIndex = index;
     // Before the first line, show what's coming.
@@ -97,6 +100,20 @@ class LockScreenLyricsService {
           .invokeMethod("lyric", {"title": _title, "line": line.isEmpty ? "♪" : line, "next": next})
           .catchError((Object e) => _logger.warning("Couldn't show lyrics", e)),
     );
+  }
+
+  /// How long until a line after [position] (in ticks) begins, playing at [speed]; null when none does, or it stands
+  /// still. A little late rather than early, so the line has begun when it's looked up.
+  @visibleForTesting
+  static Duration? untilNextLine(List<LyricLine> lines, int position, double speed) {
+    if (speed <= 0) return null;
+    int? next;
+    for (final line in lines) {
+      final start = line.start;
+      if (start != null && start > position && (next == null || start < next)) next = start;
+    }
+    if (next == null) return null;
+    return Duration(microseconds: ((next - position) / 10 / speed).ceil()) + const Duration(milliseconds: 20);
   }
 
   static void _clear() {

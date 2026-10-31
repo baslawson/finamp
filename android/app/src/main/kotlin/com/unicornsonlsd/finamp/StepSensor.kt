@@ -17,7 +17,9 @@ class StepSensor(context: Context) : EventChannel.StreamHandler, SensorEventList
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink) {
         sink = events
-        detector?.let { sensors?.registerListener(this, it, SensorManager.SENSOR_DELAY_FASTEST) }
+        // Steps may arrive batched up to a second late, so the CPU can sleep between them: each event keeps the time
+        // the step happened, and that's what the cadence is worked out from.
+        detector?.let { sensors?.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL, MAX_REPORT_LATENCY_US) }
     }
 
     override fun onCancel(arguments: Any?) {
@@ -30,4 +32,8 @@ class StepSensor(context: Context) : EventChannel.StreamHandler, SensorEventList
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
+
+    private companion object {
+        const val MAX_REPORT_LATENCY_US = 1_000_000
+    }
 }

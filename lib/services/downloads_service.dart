@@ -115,6 +115,13 @@ class DownloadsService {
   /// Marks whether we have encountered an image with a missing blurhash
   bool serverMissingBlurhash = false;
 
+  /// Downloaded images already checked, by isar id: artwork asks for its image whenever a tile is built, and checking
+  /// means a database read and a look at the file. Cleared whenever anything downloaded changes.
+  final Map<int, DownloadItem> _verifiedImages = {};
+
+  /// The ids of the offline favorites, read once rather than for every favorite check. Cleared when they change.
+  Set<int>? _favoriteIdSet;
+
   //
   // Providers
   //
@@ -223,6 +230,9 @@ class DownloadsService {
     downloadCountsStream = _downloadCountsStreamController.stream;
 
     updateDownloadCounts();
+
+    _isar.downloadItems.watchLazy().listen((_) => _verifiedImages.clear());
+    _isar.downloadItems.watchObjectLazy(_favoritesIsarId).listen((_) => _favoriteIdSet = null);
 
     FileDownloader().addTaskQueue(downloadTaskQueue);
 
@@ -1664,7 +1674,12 @@ class DownloadsService {
     if (item != null && item.blurHash == null) {
       serverMissingBlurhash = true;
     }
-    return _getDownloadByID(imageId, DownloadItemType.image);
+    final isarId = DownloadStub.getHash(imageId, DownloadItemType.image);
+    final verified = _verifiedImages[isarId];
+    if (verified != null) return verified;
+    final download = _getDownloadByID(imageId, DownloadItemType.image);
+    if (download != null) _verifiedImages[isarId] = download;
+    return download;
   }
 
   /// Get DownloadedLyrics by the corresponding track's BaseItemDto.
@@ -1675,7 +1690,7 @@ class DownloadsService {
 
   bool? isFavorite(BaseItemDto item) {
     var stubId = DownloadStub.getHash(item.id.raw, item.downloadType);
-    return _getFavoriteIds()?.contains(stubId);
+    return (_favoriteIdSet ??= (_getFavoriteIds() ?? []).toSet()).contains(stubId);
   }
 
   /// Returns the amount of favorites known offline, optionally filtered by
@@ -1699,9 +1714,14 @@ class DownloadsService {
         .countSync();
   }
 
+  // The favorites collection's isar id, worked out without making its stub, whose name needs the app's language.
+  static final _favoritesIsarId = DownloadStub.getHash(
+    FinampCollection(type: FinampCollectionType.favorites).id,
+    DownloadItemType.finampCollection,
+  );
+
   List<int>? _getFavoriteIds() {
-    var stub = DownloadStub.fromFinampCollection(FinampCollection(type: FinampCollectionType.favorites));
-    return _isar.downloadItems.getSync(stub.isarId)?.orderedChildren ?? [];
+    return _isar.downloadItems.getSync(_favoritesIsarId)?.orderedChildren ?? [];
   }
 
   /// Get a downloadItem with verified files by id.

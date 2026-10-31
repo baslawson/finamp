@@ -217,8 +217,8 @@ Future<void> main(List<String> args, {bool integrationTesting = false, bool logi
     await _migrateThemeModeLocale();
     await _addPlusQuickActions();
     _mainLog.info("Completed applicable migrations");
-    await _trustAndroidUserCerts();
-    await ClientCertificateInstaller().installClientCertificate();
+    // One trusts the user's certificate authorities, the other installs a client certificate: neither needs the other.
+    await Future.wait([_trustAndroidUserCerts(), ClientCertificateInstaller().installClientCertificate()]);
     _mainLog.info("Installed client certificate");
     await _setupFinampUserHelper();
     _mainLog.info("Setup user helper");
@@ -422,13 +422,25 @@ Future<void> _setupProviders() async {
   DataSourceService.create();
   AutoOffline.startWatching();
 
-  unawaited(
-    Stream<void>.periodic(Duration(seconds: 1)).forEach((_) {
-      if (!SchedulerBinding.instance.framesEnabled) {
-        (providerScopeKey.currentContext as InheritedElement?)?.build();
-      }
-    }),
-  );
+  // While frames are off (the app in the background) the providers are kept going by rebuilding their scope each
+  // second, so the timer only runs then.
+  Timer? backgroundRebuilds;
+  void followFrames() {
+    if (SchedulerBinding.instance.framesEnabled) {
+      backgroundRebuilds?.cancel();
+      backgroundRebuilds = null;
+    } else {
+      backgroundRebuilds ??= Timer.periodic(const Duration(seconds: 1), (_) {
+        if (!SchedulerBinding.instance.framesEnabled) {
+          (providerScopeKey.currentContext as InheritedElement?)?.build();
+        }
+      });
+    }
+  }
+
+  // Frames are turned on and off with the app's lifecycle, before listeners hear of it.
+  AppLifecycleListener(onStateChange: (_) => followFrames());
+  followFrames();
 }
 
 Future<void> _setupOSIntegration(List<String> commandLineArgs) async {
@@ -541,7 +553,8 @@ Future<void> _setupPlaybackServices() async {
   final queueService = QueueService();
   GetIt.instance.registerSingleton(queueService);
   audioHandler.onQueueServiceAvailable();
-  await DeviceSoundProfiles.initialize();
+  // Neither needs the other, and the services started below need neither straight away.
+  await Future.wait([DeviceSoundProfiles.initialize(), ListeningPreferences.ensureLoaded()]);
   HomeWidgetService.start(audioHandler);
   unawaited(DjTransitionService.initialize());
   unawaited(NightModeService.initialize());
@@ -552,7 +565,6 @@ Future<void> _setupPlaybackServices() async {
   unawaited(CarModeService.initialize());
   unawaited(ScrobbleService.flush());
   unawaited(Future<void>.delayed(const Duration(seconds: 30), _checkNewReleases));
-  await ListeningPreferences.ensureLoaded();
   unawaited(RollingReserveService.initialize());
   unawaited(GenreEqService.initialize());
   unawaited(LockScreenLyricsService.initialize());

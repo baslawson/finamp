@@ -7,6 +7,8 @@ package com.ryanheise.just_audio;
  */
 final class LookaheadLimiter {
     private final int channels, size;
+    // The lookahead's length in frames between its ends, for the attack ramp.
+    private final double span;
     private final float[][] ring;
     private final double[] peaks;
     // The ceiling each waiting frame came with, and the drain's: the detector catches up with the ones it had then.
@@ -38,6 +40,7 @@ final class LookaheadLimiter {
         this.detectAlways = detectAlways;
         tail = new float[TruePeakDetector.TAPS - 1][channels];
         size = Math.max(1, (int) Math.ceil(rate * 0.005)) + 1;
+        span = size - 1.0;
         ring = new float[size][channels];
         peaks = new double[size];
         ceilings = new double[size];
@@ -46,7 +49,8 @@ final class LookaheadLimiter {
     }
     boolean push(float[] frame, float[] output, double ceiling, boolean enabled) {
         updateThreshold(ceiling);
-        int slot = (start + count) % size;
+        int slot = start + count;
+        if (slot >= size) slot -= size;
         System.arraycopy(frame, 0, ring[slot], 0, channels);
         double peak = 0;
         for (float sample : frame) peak = Math.max(peak, Math.abs(sample));
@@ -57,7 +61,7 @@ final class LookaheadLimiter {
         latestSlot = slot;
         if (enabled || detectAlways) {
             if (detectorBehind) catchUp(ceiling);
-            else protectInterpolation(truePeak.push(frame), slot, 0, ceiling);
+            else protectInterpolation(truePeak.push(frame, ceiling), slot, 0, ceiling);
         } else {
             detectorBehind = true;
         }
@@ -71,7 +75,8 @@ final class LookaheadLimiter {
         for (int tap = padding; tap < TruePeakDetector.TAPS; tap++) {
             int distance = tap - padding;
             if (distance >= count) break;
-            int index = (slot - distance + size) % size;
+            int index = slot - distance;
+            if (index < 0) index += size;
             if (peak > peaks[index]) {
                 if (peaks[index] <= ceiling) over++;
                 peaks[index] = peak;
@@ -97,11 +102,14 @@ final class LookaheadLimiter {
             // Normal/Quiet with measured headroom usually need no limiting at
             // all. Skip the lookahead search unless the window has an overshoot.
             if (over > 0) {
-                for (int offset = 0; offset < count; offset++) {
-                    double peak = peaks[(start + offset) % size];
+                for (int offset = 0, index = start; offset < count; offset++) {
+                    double peak = peaks[index];
+                    if (++index == size) index = 0;
                     if (peak <= ceiling) continue;
                     double target = ceiling / peak;
-                    goal = Math.min(goal, target + (1 - target) * offset / (size - 1.0));
+                    // The ramp only adds to the target, so a target already at or above the goal can't lower it.
+                    if (target >= goal) continue;
+                    goal = Math.min(goal, target + (1 - target) * offset / span);
                 }
             }
         }
@@ -110,18 +118,20 @@ final class LookaheadLimiter {
         gain = Math.min(goal, 1 - (1 - gain) * release);
         float[] frame = ring[start];
         for (int channel = 0; channel < channels; channel++) output[channel] = (float) (frame[channel] * gain);
-        System.arraycopy(frame, 0, tail[(tailStart + tailCount) % tail.length], 0, channels);
+        int tailSlot = tailStart + tailCount;
+        if (tailSlot >= tail.length) tailSlot -= tail.length;
+        System.arraycopy(frame, 0, tail[tailSlot], 0, channels);
         if (tailCount < tail.length) tailCount++;
-        else tailStart = (tailStart + 1) % tail.length;
+        else if (++tailStart == tail.length) tailStart = 0;
         if (peaks[start] > ceiling) over--;
-        start = (start + 1) % size;
+        if (++start == size) start = 0;
         count--;
         return true;
     }
 
     private void drainDetector(double ceiling) {
         for (int padding = 1; padding < TruePeakDetector.TAPS; padding++) {
-            protectInterpolation(truePeak.push(null), latestSlot, padding, ceiling);
+            protectInterpolation(truePeak.push(null, ceiling), latestSlot, padding, ceiling);
         }
     }
 
@@ -141,7 +151,7 @@ final class LookaheadLimiter {
         for (int i = 0; i < waiting; i++) {
             count = i + 1;
             int slot = (start + i) % size;
-            protectInterpolation(truePeak.push(ring[slot]), slot, 0, ceilings[slot]);
+            protectInterpolation(truePeak.push(ring[slot], ceilings[slot]), slot, 0, ceilings[slot]);
         }
         count = waiting;
         if (drainedDetector) drainDetector(drainCeiling);

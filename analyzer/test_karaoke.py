@@ -1,6 +1,6 @@
 import json
 import threading
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 import tempfile
 import unittest
 from pathlib import Path
@@ -246,7 +246,7 @@ class KaraokeTests(unittest.TestCase):
                         (self.root / self.revision / 'result.json').write_text('{')
                 k.enqueue(self.song, 'both')
                 command, source, _, _ = self.prepare_both()
-                self.assertEqual(command[-2:], [f'{k.MODEL},{k.DRUM_MODEL}', 'both'])
+                self.assertEqual(command[5:7], [f'{k.MODEL},{k.DRUM_MODEL}', 'both'])
                 self.assertEqual(Path(command[2]), self.root / 'music.flac')
                 self.assertIsNone(source)
 
@@ -269,6 +269,125 @@ class KaraokeTests(unittest.TestCase):
         self.assertEqual(k.status(self.song, 'both')['state'], 'ready')
         self.assertFalse((destination / 'instrumental.flac').exists())
         self.assertTrue((self.root / self.revision / 'mix-0.flac').is_file())
+
+    def finish_both(self, returncode=0, during=lambda: None):
+        """Runs the queued vocals-and-drums job with a worker that leaves both its results, returning its command."""
+        destination, commands = self.root / self.both, []
+
+        def start(command, **_):
+            commands.append(command)
+            folders = [destination] + ([Path(command[7])] if len(command) > 7 else [])
+            for folder in folders:
+                folder.mkdir(exist_ok=True)
+                (folder / 'result.json').write_text(json.dumps({
+                    'mixes': {str(g): {'bytes': 4, 'version': 1, 'lufs': -14, 'truePeak': -1}
+                              for g in (0, 25, 50, 75, 100)}, 'seconds': 7, 'model': 'm', 'part': 'p'}))
+                for guide in (0, 25, 50, 75, 100):
+                    (folder / f'mix-{guide}.flac').write_bytes(b'mix!')
+            during()
+            return Mock(returncode=returncode, poll=Mock(return_value=returncode))
+        with patch.object(k.subprocess, 'run', return_value=Mock(stdout='{"format": {"duration": "200"}}')), \
+                patch.object(k.shutil, 'disk_usage', return_value=Mock(free=10 * 1024 ** 3)), \
+                patch.object(k.subprocess, 'Popen', side_effect=start):
+            with ExitStack() as leases:
+                k.work_one(threading.Event(), leases)
+        return commands[0]
+
+    def test_both_keeps_its_vocal_pass_as_the_karaoke_when_the_song_has_none(self):
+        k.enqueue(self.song, 'both')
+        command = self.finish_both()
+        self.assertEqual(command[5:], [f'{k.MODEL},{k.DRUM_MODEL}', 'both', str(self.root / self.both / 'vocals')])
+        self.assertEqual(k.status(self.song, 'both')['state'], 'ready')
+        vocals = k.status(self.song)
+        self.assertEqual((vocals['state'], vocals['revision'], vocals['seconds']), ('ready', self.revision, 7))
+        self.assertEqual((self.root / self.revision / 'mix-0.flac').read_bytes(), b'mix!')
+        self.assertFalse((self.root / self.both / 'vocals').exists())
+        # And a song waiting for its karaoke has it straight away.
+        with k.connect() as db:
+            db.execute('DELETE FROM jobs')
+        k.enqueue(self.song)
+        k.enqueue(self.song, 'both')
+        with k.connect() as db:
+            db.execute("UPDATE jobs SET queued=queued+100 WHERE part='vocals'")
+        self.finish_both()
+        self.assertEqual(k.status(self.song)['state'], 'ready')
+
+    def test_both_leaves_a_song_with_its_own_karaoke_alone(self):
+        for state in ('processing', 'stale'):
+            with self.subTest(state=state):
+                with k.connect() as db:
+                    db.execute('DELETE FROM jobs')
+                k.enqueue(self.song)
+                k.update(self.song, self.revision, state='processing')
+                if state == 'stale':
+                    with k.connect() as db:
+                        db.execute("UPDATE jobs SET revision=?, state='ready' WHERE part='vocals'", ('7' * 64,))
+                k.enqueue(self.song, 'both')
+                command = self.finish_both()
+                self.assertEqual(len(command), 7)
+                with k.connect() as db:
+                    row = db.execute("SELECT state, revision FROM jobs WHERE part='vocals'").fetchone()
+                self.assertEqual(tuple(row), ('processing', self.revision) if state == 'processing'
+                                 else ('ready', '7' * 64))
+
+    def test_both_does_not_take_a_karaoke_folder_another_job_claimed_meanwhile(self):
+        other = 'e' * 32
+        k.enqueue(self.song, 'both')
+
+        def claim():
+            # Another Jellyfin entry for the same file asks for its karaoke while the separation runs.
+            with k.connect() as db:
+                db.execute("INSERT INTO jobs (id,part,revision,state,queued) VALUES (?,'vocals',?,'queued',?)",
+                           (other, self.revision, k.time.time()))
+        self.finish_both(during=claim)
+        self.assertEqual(k.status(self.song, 'both')['state'], 'ready')
+        self.assertEqual(k.status(self.song)['state'], 'missing')
+        self.assertEqual(k.status(other)['state'], 'queued')
+
+    def test_deleting_a_waiting_karaoke_meanwhile_does_not_spoil_the_vocal_pass(self):
+        k.enqueue(self.song, 'both')
+
+        def change_mind():
+            # Karaoke asked for and deleted again from the dashboard while the separation runs.
+            k.enqueue(self.song)
+            k.delete(self.song)
+        self.finish_both(during=change_mind)
+        self.assertEqual(k.status(self.song, 'both')['state'], 'ready')
+        self.assertEqual(k.status(self.song)['state'], 'ready')
+        self.assertTrue((self.root / self.revision / 'result.json').is_file())
+
+    def test_a_failed_both_keeps_no_vocal_karaoke(self):
+        k.enqueue(self.song, 'both')
+        self.finish_both(returncode=1)
+        self.assertEqual(k.status(self.song)['state'], 'missing')
+        self.assertFalse((self.root / self.revision).exists())
+        self.assertFalse((self.root / self.both / 'vocals').exists())
+
+    def test_unchanged_progress_is_not_written_again(self):
+        k.enqueue(self.song, 'drums')
+        process = Mock(returncode=1)
+        process.poll.side_effect = [None] * 5 + [1] * 9
+        stop = Mock()
+        stop.wait.return_value = False
+        with patch.object(k.subprocess, 'run', return_value=Mock(stdout='{"format": {"duration": "200"}}')), \
+                patch.object(k.shutil, 'disk_usage', return_value=Mock(free=10 * 1024 ** 3)), \
+                patch.object(k.subprocess, 'Popen', return_value=process), \
+                patch.object(k, 'update', wraps=k.update) as update:
+            with ExitStack() as leases:
+                k.work_one(stop, leases)
+        progress = [call for call in update.call_args_list if 'state' not in call.kwargs]
+        self.assertEqual(len(progress), 1)
+
+    def test_the_queue_is_in_wal_mode_and_readable_read_only(self):
+        with patch.object(k, 'RuntimeGovernor'), patch.object(k, 'work'), TestClient(k.app):
+            pass
+        with k.connect() as db:
+            self.assertEqual(db.execute('PRAGMA journal_mode').fetchone()[0], 'wal')
+            self.assertEqual(db.execute('PRAGMA synchronous').fetchone()[0], 1)
+            k.enqueue(self.song)
+            # As the hub reads it, while the queue has it open.
+            with closing(k.sqlite3.connect((self.root / 'jobs.db').as_uri() + '?mode=ro', uri=True)) as hub:
+                self.assertEqual(hub.execute('SELECT count(*) FROM jobs').fetchone()[0], 1)
 
     def test_both_gets_time_for_each_separation_it_runs(self):
         k.enqueue(self.song, 'both')
@@ -327,13 +446,33 @@ class KaraokeTests(unittest.TestCase):
             result = k.statuses(request)
             self.assertEqual([result[song]['state'] for song in (self.song, queued, missing)], ['ready', 'queued', 'missing'])
             sources.assert_called_once_with([self.song], 'vocals')
+            # Each later check is past the 30 seconds a checked revision is kept.
+            k.REVISIONS.clear()
             sources.return_value = {self.song: (self.root / 'music.flac', 'e' * 64)}
             self.assertEqual(k.statuses(request)[self.song]['state'], 'missing')
+            k.REVISIONS.clear()
             sources.return_value = {}
             self.assertEqual(k.statuses(request)[self.song]['state'], 'missing')
+            k.REVISIONS.clear()
             sources.return_value = {self.song: (self.root / 'music.flac', self.revision)}
             (self.root / self.revision / 'mix-0.flac').unlink()
             self.assertEqual(k.statuses(request)[self.song]['state'], 'missing')
+
+    def test_batched_status_asks_jellyfin_again_only_after_30_seconds(self):
+        self.ready()
+        request = k.StatusRequest(ids=[self.song])
+        clock = [1000.0]
+        with patch.object(k, 'sources_for', side_effect=lambda songs, part: {
+                    song: (self.root / 'music.flac', self.revision) for song in songs}) as sources, \
+                patch.object(k.time, 'monotonic', side_effect=lambda: clock[0]):
+            for elapsed in (0, 10, 29):
+                clock[0] = 1000.0 + elapsed
+                self.assertEqual(k.statuses(request)[self.song]['state'], 'ready')
+            self.assertEqual([call.args for call in sources.call_args_list if call.args[0]], [([self.song], 'vocals')])
+            clock[0] = 1031.0
+            k.statuses(request)
+            self.assertEqual(len([call for call in sources.call_args_list if call.args[0]]), 2)
+            self.assertEqual(sources.call_args.args, ([self.song], 'vocals'))
 
     def test_batched_status_route_is_authenticated_and_bounded(self):
         client = TestClient(k.app)

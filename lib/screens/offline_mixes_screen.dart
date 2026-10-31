@@ -16,6 +16,11 @@ import 'package:get_it/get_it.dart';
 class OfflineMixesScreen extends StatefulWidget {
   const OfflineMixesScreen({super.key, this.createFromQueue = false});
   final bool createFromQueue;
+
+  /// Whether download progress still needs looking at: some mix not yet ready, or being prepared.
+  @visibleForTesting
+  static bool pollNeeded(Iterable<({int music, int voices, bool ready})> statuses, Set<String> preparing) =>
+      preparing.isNotEmpty || statuses.any((status) => !status.ready);
   @override
   State<OfflineMixesScreen> createState() => _OfflineMixesScreenState();
 }
@@ -24,7 +29,7 @@ class _OfflineMixesScreenState extends State<OfflineMixesScreen> {
   OfflineDjLibrary? _library;
   final _statuses = <String, ({int music, int voices, bool ready})>{};
   Timer? _timer;
-  bool _busy = false, _refreshing = false;
+  bool _busy = false, _refreshing = false, _refreshAgain = false;
   bool _createShown = false;
   String? _error;
 
@@ -33,7 +38,18 @@ class _OfflineMixesScreenState extends State<OfflineMixesScreen> {
     super.initState();
     OfflineMixService.preparing.addListener(_changed);
     _load();
-    _timer = Timer.periodic(const Duration(seconds: 2), (_) => unawaited(_refresh()));
+    _poll(true);
+  }
+
+  /// Downloads have no listener here: their progress is looked at every 2 seconds, but only while some mix is still
+  /// downloading or being prepared.
+  void _poll(bool needed) {
+    if (!needed) {
+      _timer?.cancel();
+      _timer = null;
+    } else {
+      _timer ??= Timer.periodic(const Duration(seconds: 2), (_) => unawaited(_refresh()));
+    }
   }
 
   @override
@@ -71,7 +87,12 @@ class _OfflineMixesScreenState extends State<OfflineMixesScreen> {
 
   Future<void> _refresh() async {
     final library = _library;
-    if (!mounted || _refreshing || library == null) return;
+    if (!mounted || library == null) return;
+    // A change while looking: looked at again after, as the poll may stop.
+    if (_refreshing) {
+      _refreshAgain = true;
+      return;
+    }
     if (library.scope != RadioPreferencesStore.scope) {
       await _load();
       return;
@@ -88,11 +109,16 @@ class _OfflineMixesScreenState extends State<OfflineMixesScreen> {
             ..clear()
             ..addAll(values);
         });
+        _poll(OfflineMixesScreen.pollNeeded(values.values, OfflineMixService.preparing.value));
       }
     } catch (error) {
       if (mounted) setState(() => _error = '$error');
     } finally {
       _refreshing = false;
+      if (_refreshAgain && mounted) {
+        _refreshAgain = false;
+        unawaited(_refresh());
+      }
     }
   }
 

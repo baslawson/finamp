@@ -5,9 +5,11 @@ import 'dart:io';
 import 'package:finamp/models/jellyfin_models.dart';
 import 'package:finamp/services/finamp_settings_helper.dart';
 import 'package:finamp/services/finamp_user_helper.dart';
+import 'package:finamp/services/item_by_id_provider.dart';
 import 'package:finamp/services/jellyfin_api_helper.dart';
 import 'package:finamp/services/music_player_background_task.dart';
 import 'package:flutter_discord_rpc/flutter_discord_rpc.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:get_it/get_it.dart';
 import 'package:logging/logging.dart';
 
@@ -178,9 +180,12 @@ class DiscordRpc {
     }
 
     if (!skipUrlGetting) {
-      smallImage = _jellyfinApiHelper
-          .getImageUrl(item: artistItem!, maxHeight: 128, maxWidth: 128, forcePublicAddress: forcePublicAddress)
-          ?.toString();
+      // The cache gives no artist offline when it isn't downloaded.
+      smallImage = artistItem == null
+          ? null
+          : _jellyfinApiHelper
+                .getImageUrl(item: artistItem!, maxHeight: 128, maxWidth: 128, forcePublicAddress: forcePublicAddress)
+                ?.toString();
       largeImage = _jellyfinApiHelper
           .getImageUrl(item: baseItem, maxHeight: 128, maxWidth: 128, forcePublicAddress: forcePublicAddress)
           ?.toString();
@@ -203,7 +208,10 @@ class DiscordRpc {
     final baseItem = BaseItemDto.fromJson(mediaItem!.extras!["itemJson"] as Map<String, dynamic>);
 
     if (artistItem == null || !baseItem.artistItems!.any((v) => v.id == artistItem?.id)) {
-      artistItem = await _jellyfinApiHelper.getItemById(baseItem.artistItems!.first.id);
+      // Through the shared cache, which the player screen's artist chips have usually filled already.
+      artistItem = await GetIt.instance<ProviderContainer>().read(
+        itemByIdProvider(baseItem.artistItems!.first.id).future,
+      );
     }
 
     final now = (DateTime.now().millisecondsSinceEpoch / 1000).truncate();

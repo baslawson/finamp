@@ -50,11 +50,16 @@ class FinampLogsHelper {
       }
     }
 
-    // We don't want to keep logs forever due to memory constraints.
-    if (logs.length > (kDebugMode ? 10000 : 1000)) {
-      logs.removeAt(0);
+    // We don't want to keep logs forever due to memory constraints. Trimmed a tenth at a time, as taking the first
+    // off a list moves all the rest.
+    if (logs.length > keptLogs + keptLogs ~/ 10) {
+      logs.removeRange(0, logs.length - keptLogs);
     }
   }
+
+  /// How many of the latest logs are kept in memory (up to a tenth more before they're trimmed).
+  @visibleForTesting
+  static const keptLogs = kDebugMode ? 10000 : 1000;
 
   /// Sanitises all logs and returns a massive string
   String getSanitisedLogs() {

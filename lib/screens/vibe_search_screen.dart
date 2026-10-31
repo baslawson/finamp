@@ -32,15 +32,13 @@ final _vibeResultsProvider = FutureProvider.autoDispose.family<List<BaseItemDto>
   return _tracksInOrder(ids);
 });
 
-final _analyzerConfiguredProvider = FutureProvider.autoDispose((ref) => AnalyzerService.isConfigured());
-
 /// Shortcuts to vibe search and song recognition, shown on the empty search screen.
 class AnalyzerSearchTiles extends ConsumerWidget {
   const AnalyzerSearchTiles({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final configured = ref.watch(_analyzerConfiguredProvider).valueOrNull ?? false;
+    final configured = ref.watch(analyzerConfiguredProvider).valueOrNull ?? false;
     void openOrSetUp(VoidCallback open) =>
         configured ? open() : Navigator.of(context).pushNamed(AnalyzerSettingsScreen.routeName);
 

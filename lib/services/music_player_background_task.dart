@@ -1632,14 +1632,15 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
           loudnessTrackId(track),
           downloaded: track.extras?['downloadedTrackPath'] != null,
         );
+        final enabled = _normalizationEnabledFor(track, album: album);
         final snapshot = karaokeGain != null
             ? NormalizationSnapshot(
-                source: _normalizationEnabledFor(track) ? NormalizationSource.track : NormalizationSource.off,
-                gainDb: _normalizationEnabledFor(track) ? karaokeGain : 0,
+                source: enabled ? NormalizationSource.track : NormalizationSource.off,
+                gainDb: enabled ? karaokeGain : 0,
                 headroomDb: HeadphoneEqService.headroomDb,
               )
             : NormalizationSnapshot.calculate(
-                enabled: _normalizationEnabledFor(track),
+                enabled: enabled,
                 album: album,
                 level: LoudnessLevel.fromSetting(settings.normalizationLevel),
                 headroomDb: HeadphoneEqService.headroomDb,
@@ -1647,7 +1648,7 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
                 legacyGain:
                     measurement == null ||
                         (album && (measurement.albumLufs == null || measurement.albumTruePeak == null))
-                    ? _legacyGainForCurrentPlayback(track, null)
+                    ? _legacyGainForCurrentPlayback(track, null, album: album)
                     : null,
                 attenuationOnly: !Platform.isAndroid,
               );
@@ -1787,21 +1788,19 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
   //   return sleepTimer.getRemaining();
   // }
 
+  late final _currentFavorite = CurrentFavorite(
+    GetIt.instance<ProviderContainer>(),
+    () => unawaited(refreshPlaybackStateAndMediaNotification()),
+  );
+
   /// Transform a just_audio event into an audio_service state.
   ///
   /// This method is used from the constructor. Every event received from the
   /// just_audio player will be transformed into an audio_service state so that
   /// it can be broadcast to audio_service clients.
   PlaybackState _transformEvent(PlaybackEvent event) {
-    jellyfin_models.BaseItemDto? currentItem;
-    bool isFavorite = false;
-
-    if (mediaItem.valueOrNull?.extras?["itemJson"] != null) {
-      currentItem = jellyfin_models.BaseItemDto.fromJson(
-        mediaItem.valueOrNull?.extras!["itemJson"] as Map<String, dynamic>,
-      );
-      isFavorite = GetIt.instance<ProviderContainer>().read(isFavoriteProvider(currentItem));
-    }
+    final itemJson = mediaItem.valueOrNull?.extras?["itemJson"] as Map<String, dynamic>?;
+    final isFavorite = itemJson != null && _currentFavorite.read(itemJson);
 
     final radioEnabled = FinampSettingsHelper.finampSettings.radioEnabled;
     // AudioService.init can deliver native events before QueueService exists.
@@ -2197,9 +2196,16 @@ bool _usesAlbumNormalization(MediaItem track) {
   if (mode == VolumeNormalizationMode.albumBased) return true;
   if (mode == VolumeNormalizationMode.trackBased) return false;
   final queue = GetIt.instance<QueueService>();
-  final source = queue.getQueue().fullQueue.where((item) => item.item.id == track.id).firstOrNull?.source;
-  return queue.playbackOrder == FinampPlaybackOrder.linear &&
-      (source?.type == QueueItemSourceType.album || source?.type == QueueItemSourceType.nextUpAlbum);
+  if (queue.playbackOrder != FinampPlaybackOrder.linear) return false;
+  // Searched in place: fullQueue copies the whole queue, up to 5,000 songs, on every gain worked out.
+  final info = queue.getQueue();
+  final source = [
+    info.previousTracks,
+    [?info.currentTrack],
+    info.nextUp,
+    info.queue,
+  ].expand((part) => part).where((item) => item.item.id == track.id).firstOrNull?.source;
+  return source?.type == QueueItemSourceType.album || source?.type == QueueItemSourceType.nextUpAlbum;
 }
 
 /// AudioService uses a queue UUID or a browsing id; the analyzer uses Jellyfin's id.
@@ -2208,8 +2214,8 @@ String loudnessTrackId(MediaItem track) =>
 
 double? getGainForCurrentPlayback(MediaItem track, jellyfin_models.BaseItemDto? item) {
   final settings = FinampSettingsHelper.finampSettings;
-  if (!_normalizationEnabledFor(track)) return 0;
   final album = _usesAlbumNormalization(track);
+  if (!_normalizationEnabledFor(track, album: album)) return 0;
   final server = GetIt.instance<FinampUserHelper>().currentUser?.serverId ?? '';
   final frozen = NormalizationSession.playback.get(server, track.id);
   if (frozen != null) return frozen.gainDb;
@@ -2224,18 +2230,20 @@ double? getGainForCurrentPlayback(MediaItem track, jellyfin_models.BaseItemDto? 
     level: LoudnessLevel.fromSetting(settings.normalizationLevel),
     measurement: measurement,
     album: album,
-    legacyGain: needsLegacy ? _legacyGainForCurrentPlayback(track, item) : null,
+    legacyGain: needsLegacy ? _legacyGainForCurrentPlayback(track, item, album: album) : null,
     headroomDb: HeadphoneEqService.headroomDb,
   );
 }
 
-bool _normalizationEnabledFor(MediaItem track) {
+/// [album] is [_usesAlbumNormalization] for [track], when already worked out.
+bool _normalizationEnabledFor(MediaItem track, {bool? album}) {
   final settings = FinampSettingsHelper.finampSettings;
   return settings.volumeNormalizationActive &&
-      (settings.volumeNormalizationMode != VolumeNormalizationMode.albumOnly || _usesAlbumNormalization(track));
+      (settings.volumeNormalizationMode != VolumeNormalizationMode.albumOnly ||
+          (album ?? _usesAlbumNormalization(track)));
 }
 
-double? _legacyGainForCurrentPlayback(MediaItem currentTrack, jellyfin_models.BaseItemDto? item) {
+double? _legacyGainForCurrentPlayback(MediaItem currentTrack, jellyfin_models.BaseItemDto? item, {bool? album}) {
   final baseItem =
       item ?? jellyfin_models.BaseItemDto.fromJson(currentTrack.extras?["itemJson"] as Map<String, dynamic>);
 
@@ -2246,7 +2254,7 @@ double? _legacyGainForCurrentPlayback(MediaItem currentTrack, jellyfin_models.Ba
   ); // forces it even in background https://github.com/rrousselGit/riverpod/issues/2671
 
   switch (FinampSettingsHelper.finampSettings.volumeNormalizationMode) {
-    case VolumeNormalizationMode.hybrid when _usesAlbumNormalization(currentTrack):
+    case VolumeNormalizationMode.hybrid when album ?? _usesAlbumNormalization(currentTrack):
     case VolumeNormalizationMode.albumBased:
       // metadataProvider is still used for Jellyfin <12.0
       final albumNormalizationGain =

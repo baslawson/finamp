@@ -2436,8 +2436,18 @@ class FinampQueueItem {
   @HiveField(3)
   QueueItemQueueType type;
 
+  // Parsing the whole track is costly and this is read in build methods, so the parse is kept until [item]'s JSON is
+  // replaced.
+  Map<String, dynamic>? _baseItemJson;
+  BaseItemDto? _baseItem;
+
   BaseItemDto get baseItem {
-    return BaseItemDto.fromJson(item.extras!["itemJson"] as Map<String, dynamic>);
+    final json = item.extras!["itemJson"] as Map<String, dynamic>;
+    if (!identical(json, _baseItemJson)) {
+      _baseItem = BaseItemDto.fromJson(json);
+      _baseItemJson = json;
+    }
+    return _baseItem!;
   }
 
   BaseItemId get baseItemId => item.extras!["itemJson"]["Id"] as BaseItemId;
@@ -3760,7 +3770,7 @@ enum DiscordRpcIcon {
   String toImage() {
     switch (this) {
       case dark:
-        return "assets/icon/icon_combined.png";
+        return "assets/icon/icon_preview.png";
       case black:
         return "assets/icon/icon_square_bg-black.png";
       case light:

@@ -146,6 +146,45 @@ class QueueService {
   // Flags for saving and loading saved queues
   int _saveUpdateCycleCount = 0;
   bool _saveUpdateImmediate = false;
+  Timer? _saveTimer;
+
+  /// The ten-second save check runs while playing, and while paused or stopped only until the last change is saved,
+  /// rather than waking the phone every ten seconds for nothing.
+  @visibleForTesting
+  static bool saveTimerNeeded({required bool paused, required bool saveImmediate, required SavedQueueState state}) =>
+      !paused || (saveImmediate && state == SavedQueueState.saving);
+
+  void _updateSaveTimer() {
+    if (saveTimerNeeded(paused: _audioHandler.paused, saveImmediate: _saveUpdateImmediate, state: _savedQueueState)) {
+      _saveTimer ??= Timer.periodic(const Duration(seconds: 10), (_) => _saveTick());
+    } else {
+      _saveTimer?.cancel();
+      _saveTimer = null;
+    }
+  }
+
+  void _saveTick() {
+    // Update once per minute while playing in background, and up to once every ten seconds if
+    // pausing/seeking is occurring
+    // We also update on every track switch.
+    if ((_saveUpdateCycleCount >= 5 && !_audioHandler.paused) || _saveUpdateImmediate) {
+      if (_savedQueueState == SavedQueueState.pendingSave && !_audioHandler.paused) {
+        _savedQueueState = SavedQueueState.saving;
+      }
+      if (_savedQueueState == SavedQueueState.saving) {
+        _saveUpdateImmediate = false;
+        _saveUpdateCycleCount = 0;
+        final info = _saveCurrentQueue(withPosition: true);
+        _queueServiceLogger.finest("Saved new periodic queue $info");
+      }
+    } else {
+      _saveUpdateCycleCount++;
+    }
+    // just in case, check if there are radio tracks missing (due to errors, race conditions, etc.)
+    unawaited(maybeAddRadioTracks());
+    _updateSaveTimer();
+  }
+
   SavedQueueState _savedQueueState = SavedQueueState.preInit;
   int _replacing = 0;
 
@@ -192,28 +231,9 @@ class QueueService {
       } else {
         _saveUpdateImmediate = true;
       }
+      _updateSaveTimer();
     });
-
-    Stream<void>.periodic(const Duration(seconds: 10)).listen((event) {
-      // Update once per minute while playing in background, and up to once every ten seconds if
-      // pausing/seeking is occurring
-      // We also update on every track switch.
-      if ((_saveUpdateCycleCount >= 5 && !_audioHandler.paused) || _saveUpdateImmediate) {
-        if (_savedQueueState == SavedQueueState.pendingSave && !_audioHandler.paused) {
-          _savedQueueState = SavedQueueState.saving;
-        }
-        if (_savedQueueState == SavedQueueState.saving) {
-          _saveUpdateImmediate = false;
-          _saveUpdateCycleCount = 0;
-          final info = _saveCurrentQueue(withPosition: true);
-          _queueServiceLogger.finest("Saved new periodic queue $info");
-        }
-      } else {
-        _saveUpdateCycleCount++;
-      }
-      // just in case, check if there are radio tracks missing (due to errors, race conditions, etc.)
-      unawaited(maybeAddRadioTracks());
-    });
+    _updateSaveTimer();
 
     // check if new radio tracks are needed whenever the queue changes in some way
     _queueStream.listen((_) {

@@ -9,6 +9,7 @@ import 'package:finamp/services/music_player_background_task.dart';
 import 'package:finamp/services/playon_service.dart';
 import 'package:finamp/services/queue_service.dart';
 import 'package:finamp/utils/platform_helper.dart';
+import 'package:flutter/foundation.dart';
 import 'package:get_it/get_it.dart';
 import 'package:logging/logging.dart';
 import 'package:rxdart/rxdart.dart';
@@ -61,11 +62,16 @@ class PlaybackHistoryService {
     ListeningSession.excludeFromLearning.addListener(() {
       if (ListeningSession.excludeFromLearning.value) ListeningSession.exclude(_currentTrack);
     });
+    var wasOffline = FinampSettingsHelper.finampSettings.isOffline;
+    var reported = _reportedSettings;
     FinampSettingsHelper.finampSettingsListener.addListener(() {
       final isOffline = FinampSettingsHelper.finampSettings.isOffline;
-      if (!isOffline) {
+      final now = _reportedSettings;
+      if (reportsSettingsChange(wasOffline: wasOffline, isOffline: isOffline, before: reported, after: now)) {
         _updatePlaybackInfo();
       }
+      wasOffline = isOffline;
+      reported = now;
     });
 
     bool throttleRemoteSessionReporting = false;
@@ -229,6 +235,20 @@ class PlaybackHistoryService {
   }
 
   List<FinampHistoryItem> get history => _history;
+
+  /// What a playback report takes from the settings and the player's modes.
+  Object get _reportedSettings =>
+      (FinampSettingsHelper.finampSettings.currentVolume, _queueService.loopMode, _queueService.playbackOrder);
+
+  /// A settings change is reported on coming back online, or when it changes what a report says (volume, loop,
+  /// order); not on every other setting saved, many of them while playing.
+  @visibleForTesting
+  static bool reportsSettingsChange({
+    required bool wasOffline,
+    required bool isOffline,
+    required Object before,
+    required Object after,
+  }) => !isOffline && (wasOffline || before != after);
 
   BehaviorSubject<List<FinampHistoryItem>> get historyStream => _historyStream;
 

@@ -34,13 +34,13 @@ class FakeSeparator:
 
 
 class WorkerTests(unittest.TestCase):
-    def run_worker(self, stems, part='vocals', model='fake.onnx'):
+    def run_worker(self, stems, part='vocals', model='fake.onnx', vocals=None):
         fake_separator = types.ModuleType('audio_separator.separator')
         fake_separator.Separator = FakeSeparator
         fake_torch = types.ModuleType('torch')
-        fake_torch.set_num_threads = Mock()
-        fake_ort = types.ModuleType('onnxruntime')
-        fake_ort.InferenceSession = Mock()
+        fake_torch.set_num_threads = self.threads = Mock()
+        fake_ort = self.ort = types.ModuleType('onnxruntime')
+        fake_ort.InferenceSession = self.session = Mock()
         fake_ort.SessionOptions = Mock()
         temp = tempfile.TemporaryDirectory()
         self.addCleanup(temp.cleanup)
@@ -52,7 +52,8 @@ class WorkerTests(unittest.TestCase):
         sf.write(str(source), audio, 44100, subtype='FLOAT')
         with patch.dict(sys.modules, {'audio_separator.separator': fake_separator, 'torch': fake_torch,
                                       'onnxruntime': fake_ort}), patch.object(FakeSeparator, 'stems', stems):
-            prepare(str(source), str(folder / 'out'), str(folder / 'models'), model, 2, .25, part=part)
+            prepare(str(source), str(folder / 'out'), str(folder / 'models'), model, 2, .25, part=part,
+                    vocals=vocals and str(folder / vocals))
         return audio, folder / 'out'
 
     def assert_mixes(self, audio, out, backing, guide_share):
@@ -102,6 +103,34 @@ class WorkerTests(unittest.TestCase):
     def test_both_from_a_song_without_vocals_runs_only_the_drum_model(self):
         audio, out = self.run_worker({'drum.onnx': [('Drums', .25), ('No Drums', .75)]}, 'both', 'drum.onnx')
         self.assert_mixes(audio, out, .75, .25)
+
+    def test_both_keeps_its_vocal_pass_as_the_vocals_preparation_would_make_it(self):
+        stems = {'vocal.onnx': [('Instrumental', .6), ('Vocals', .4)], 'drum.onnx': [('Drums', .25), ('No Drums', .75)]}
+        audio, out = self.run_worker(stems, 'both', 'vocal.onnx,drum.onnx', vocals='vocals')
+        self.assert_mixes(audio, out, .45, .15)
+        kept = out.parent / 'vocals'
+        _, alone = self.run_worker(stems, 'vocals', 'vocal.onnx')
+        manifest = json.loads((kept / 'result.json').read_text())
+        expected = json.loads((alone / 'result.json').read_text())
+        self.assertEqual((list(manifest), manifest['model'], manifest['part']), (list(expected), 'vocal.onnx', 'vocals'))
+        self.assertEqual(manifest['mixes'], expected['mixes'])
+        for guide in [0, 25, 50, 75, 100]:
+            self.assertEqual((kept / f'mix-{guide}.flac').read_bytes(), (alone / f'mix-{guide}.flac').read_bytes())
+        self.assertEqual(sorted(file.name for file in kept.iterdir()),
+                         ['mix-0.flac', 'mix-100.flac', 'mix-25.flac', 'mix-50.flac', 'mix-75.flac', 'result.json'])
+
+    def test_only_a_vocal_pass_of_both_is_kept_as_vocals(self):
+        _, out = self.run_worker({'drum.onnx': [('Drums', .25), ('No Drums', .75)]}, 'both', 'drum.onnx', vocals='v')
+        self.assertFalse((out.parent / 'v').exists())
+
+    def test_separation_models_get_the_configured_threads(self):
+        for threads in (2, 3):
+            with self.subTest(threads=threads), patch('karaoke_worker.THREADS', threads):
+                self.run_worker([('Instrumental', .6), ('Vocals', .4)])
+                self.threads.assert_called_once_with(threads)
+                self.ort.InferenceSession('model.onnx')
+                options = self.session.call_args.kwargs['sess_options']
+                self.assertEqual((options.intra_op_num_threads, options.inter_op_num_threads), (threads, 1))
 
     def test_more_models_than_parts_to_remove_fail(self):
         with self.assertRaises(RuntimeError):

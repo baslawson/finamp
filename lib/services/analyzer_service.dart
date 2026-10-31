@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:collection/collection.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -98,6 +99,14 @@ class AnalyzerException implements Exception {
   String toString() => message;
 }
 
+/// Whether the analyzer is set up, for the menus and screens that only offer its features then.
+final analyzerConfiguredProvider = FutureProvider.autoDispose((ref) {
+  // Shared by every menu, so it's checked again when the analyzer is set up or changed.
+  final changes = AnalyzerService.configurationChanges.stream.listen((_) => ref.invalidateSelf());
+  ref.onDispose(changes.cancel);
+  return AnalyzerService.isConfigured();
+});
+
 /// Talks to the Finamp+ analyzer, a small service running next to Jellyfin (see /analyzer in the repo)
 /// that powers vibe search, DJ transitions and song recognition.
 class AnalyzerService {
@@ -115,8 +124,10 @@ class AnalyzerService {
 
   static Future<({String? url, String? token})> getSettings() async {
     final prefs = SharedPreferencesAsync();
-    _url = await prefs.getString(_urlKey);
-    _token = await prefs.getString(_tokenKey);
+    // Read together, as this is asked before most analyzer features.
+    final [url, token] = await Future.wait([prefs.getString(_urlKey), prefs.getString(_tokenKey)]);
+    _url = url;
+    _token = token;
     return (url: _url, token: _token);
   }
 

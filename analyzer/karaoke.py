@@ -84,6 +84,8 @@ def vocals_removed(song, connection, revision):
 def connect():
     connection = sqlite3.connect(ROOT / "jobs.db", timeout=15)
     connection.row_factory = sqlite3.Row
+    # In WAL mode (set at startup) progress writes needn't wait for the disk; a crash loses at most the last ones.
+    connection.execute("PRAGMA synchronous=NORMAL")
     return connection
 
 
@@ -233,7 +235,7 @@ def work_one(stop, leases):
         song, revision, part = row["id"], row["revision"], row["part"]
         connection.execute("UPDATE jobs SET state='processing',progress=0.02,message=? WHERE id=? AND part=?",
                            (f'Loading {SEPARATIONS[part]} separation model', song, part))
-    destination = ROOT / revision
+    destination, vocals = ROOT / revision, None
     try:
         path, current = source_for(song, part)
         if current != revision:
@@ -259,13 +261,18 @@ def work_one(stop, leases):
                 if instrumental is not None:
                     source, models = destination / 'instrumental.flac', DRUM_MODEL
                     shutil.copyfile(instrumental, source)
+                elif vocals_wanted(song, connection, vocal_revision):
+                    # Made in this job's own folder, which can't be deleted while it runs, and moved into place after.
+                    vocals = destination / 'vocals'
+                    discard(vocals)
         passes = len(models.split(','))
         with (destination / 'worker.log').open('w') as output:
             process = subprocess.Popen(
                 [sys.executable, str(Path(__file__).with_name('karaoke_worker.py')), str(source),
-                 str(destination), str(ROOT / 'models'), models, part], stdout=output, stderr=output,
+                 str(destination), str(ROOT / 'models'), models, part, *([str(vocals)] if vocals else [])],
+                stdout=output, stderr=output,
             )
-            started = time.monotonic()
+            started, reported = time.monotonic(), None
             while process.poll() is None:
                 elapsed = time.monotonic() - started
                 if stop.wait(2) or elapsed > max(3600, duration * 12) * passes:
@@ -277,8 +284,12 @@ def work_one(stop, leases):
                 progress = destination / 'progress.json'
                 separation = json.loads(progress.read_text()) if progress.is_file() else {
                     'progress': .05, 'message': f'Loading the model and separating {SEPARATED[part]}'}
-                update(song, revision, **(separation if count == 0 else {
-                    'progress': .75 + count * .04, 'message': f'Preparing guide-{NOUNS[part]} mixes ({count}/5)'}))
+                values = separation if count == 0 else {
+                    'progress': .75 + count * .04, 'message': f'Preparing guide-{NOUNS[part]} mixes ({count}/5)'}
+                # Most polls find the same stage; the database is written only when it moves on.
+                if values != reported:
+                    update(song, revision, **values)
+                    reported = values
             if process.returncode:
                 raise RuntimeError(f"{SEPARATIONS[part].capitalize()} separation failed; the server may need more memory")
         if source != path:
@@ -287,6 +298,12 @@ def work_one(stop, leases):
             raise RuntimeError("The original song changed during preparation; prepare it again")
         manifest = read_result(destination)
         update(song, revision, state='ready', progress=1, message='Ready', seconds=manifest['seconds'])
+        if vocals:
+            try:
+                keep_vocals(song, vocal_revision, vocals)
+            except Exception as error:
+                # The drumless karaoke is ready either way.
+                log.warning('Could not keep the vocal karaoke of %s: %s', song, type(error).__name__)
     except Exception as error:
         log.warning('Karaoke preparation failed for %s: %s', song, type(error).__name__)
         message = error.detail if isinstance(error, HTTPException) else str(error)
@@ -296,7 +313,59 @@ def work_one(stop, leases):
                 for file in destination.iterdir():
                     if file.suffix in ('.wav', '.flac', '.json'):
                         file.unlink(missing_ok=True)
+            if vocals:
+                discard(vocals)
             update(song, revision, state='failed', progress=0, message=message[:180])
+
+
+def clear_results(directory):
+    if directory.is_dir():
+        for file in directory.iterdir():
+            if file.is_file() and file.suffix in ('.wav', '.flac', '.json', '.tmp'):
+                file.unlink()
+
+
+def discard(directory):
+    clear_results(directory)
+    try:
+        directory.rmdir()
+    except OSError:
+        pass
+
+
+def vocals_wanted(song, connection, revision):
+    """Whether "both" should keep its vocal pass as the song's vocals preparation ([revision] is its vocal
+    revision): when the song has none, or only a failed one or one waiting for this very revision, and no other job
+    shares that revision's folder."""
+    row = connection.execute("SELECT state, revision FROM jobs WHERE id=? AND part='vocals'", (song,)).fetchone()
+    if row is not None and row['state'] != 'failed' and not (row['state'] == 'queued' and row['revision'] == revision):
+        return False
+    return not connection.execute("SELECT 1 FROM jobs WHERE revision=? AND NOT (id=? AND part='vocals')",
+                                  (revision, song)).fetchone()
+
+
+def keep_vocals(song, revision, staged):
+    """Moves the vocal pass of a finished "both" (in [staged]) into place as the song's ready vocals preparation, if
+    still wanted, and removes what's left of it."""
+    try:
+        manifest = read_result(staged)
+        current = source_for(song)[1] == revision
+    except (OSError, ValueError, TypeError, KeyError, HTTPException):
+        manifest, current = None, False
+    try:
+        with lock, connect() as connection:
+            if current and vocals_wanted(song, connection, revision):
+                target = ROOT / revision
+                clear_results(target)
+                target.mkdir(exist_ok=True)
+                for file in staged.iterdir():
+                    if file.is_file():
+                        os.replace(file, target / file.name)
+                connection.execute('INSERT OR REPLACE INTO jobs (id,part,revision,state,progress,message,queued,seconds) '
+                                   'VALUES (?,?,?,?,?,?,?,?)',
+                                   (song, 'vocals', revision, 'ready', 1, 'Ready', time.time(), manifest['seconds']))
+    finally:
+        discard(staged)
 
 
 @asynccontextmanager
@@ -304,6 +373,8 @@ async def lifespan(_):
     global RUNTIME
     ROOT.mkdir(parents=True, exist_ok=True)
     with connect() as connection:
+        # The hub reads the queue (read-only) while progress is written; with WAL neither waits for the other.
+        connection.execute("PRAGMA journal_mode=WAL")
         migrate(connection)
         connection.execute("UPDATE jobs SET state='failed',progress=0,message='Server restarted; tap Prepare to retry' WHERE state='processing'")
     stop = threading.Event()
@@ -381,11 +452,22 @@ def statuses(request: StatusRequest):
         rows = {row['id']: row for row in connection.execute(
             f"SELECT * FROM jobs WHERE part=? AND id IN ({','.join('?' * len(songs))})", [part, *songs])}
     ready = [value for value, row in rows.items() if row['state'] == 'ready']
-    sources = sources_for(ready, part)
+    # Revisions checked in the last 30 seconds (as for playing a mix) aren't asked of Jellyfin again.
+    now, revisions = time.monotonic(), {}
+    for value in ready:
+        cached = REVISIONS.get((value, part))
+        if cached and now - cached[0] < REVISION_SECONDS:
+            revisions[value] = cached[1]
+    fetched = sources_for([value for value in ready if value not in revisions], part)
+    if len(REVISIONS) + len(fetched) > 512:
+        REVISIONS.clear()
+    for value, (_, revision) in fetched.items():
+        REVISIONS[(value, part)] = (now, revision)
+        revisions[value] = revision
     result = {}
     for value in songs:
         row = rows.get(value)
-        if row and row['state'] == 'ready' and sources.get(value, (None, None))[1] != row['revision']:
+        if row and row['state'] == 'ready' and revisions.get(value) != row['revision']:
             result[value] = {'state': 'missing', 'progress': 0, 'part': part,
                 'message': 'The original song changed or is unavailable; prepare it again'}
         else:

@@ -311,6 +311,20 @@ void main() {
     expect(sync.pauseUnsent, isFalse, reason: 'the pause went through');
   });
 
+  test('the next song playing is sent at once, as polling while playing in the background is slower', () async {
+    final hub = _Hub(tagged: false);
+    ServerHubService.client = hub.client;
+    final player = GetIt.instance<MusicPlayerBackgroundTask>() as _Player;
+    player.playbackState.add(PlaybackState(playing: true, queueIndex: 0));
+    await pumpEventQueue();
+    player.playbackState.add(PlaybackState(playing: true, queueIndex: 0));
+    await pumpEventQueue();
+    expect(hub.requests, isEmpty, reason: 'starting to play, or more of the same song, waits for the poll');
+    player.playbackState.add(PlaybackState(playing: true, queueIndex: 1));
+    await pumpEventQueue();
+    expect(hub.requests, ['GET /api/sync']);
+  });
+
   group('a request the server hub does not answer in time', () {
     // A bare socket server: it sees each connection close, which an HTTP server waiting to answer does not.
     late ServerSocket server;

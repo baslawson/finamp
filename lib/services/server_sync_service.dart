@@ -32,12 +32,15 @@ class ServerSyncService {
       if (state.playing && !_playing) _claim++;
       // Paused: the queue's last position goes up now, before polling slows down.
       final paused = !state.playing && _playing;
+      // The next song: sent now, as polling while playing in the background is every few minutes.
+      final nextSong = state.playing && _playing && _queueIndex != null && state.queueIndex != _queueIndex;
       _playing = state.playing;
+      _queueIndex = state.queueIndex;
       if (paused) {
         _pauses++;
         _unsentUntil = DateTime.now().add(const Duration(minutes: 15));
-        unawaited(sync());
       }
+      if (paused || nextSong) unawaited(sync());
     });
     _foreground = (WidgetsBinding.instance.lifecycleState ?? AppLifecycleState.resumed) == AppLifecycleState.resumed;
     _lifecycle = AppLifecycleListener(
@@ -50,6 +53,7 @@ class ServerSyncService {
   StreamSubscription<dynamic>? _playback;
   AppLifecycleListener? _lifecycle;
   bool _busy = false, _playing = false, _foreground = true;
+  int? _queueIndex;
   // Asked for while a sync was already under way (a pause, "Resume here"): it runs again once that's done.
   bool _again = false, _againForced = false;
   DateTime? _lastPoll;
@@ -60,8 +64,9 @@ class ServerSyncService {
   @visibleForTesting
   bool get pauseUnsent => _unsentUntil != null;
 
-  /// Every 30 seconds while playing (the queue's position goes up), open on screen, or with a pause not yet sent (for
-  /// up to [unsentUntil]); otherwise every 15 minutes, for changes made on other devices.
+  /// Every 30 seconds while open on screen, or with a pause not yet sent (for up to [unsentUntil]); every 3 minutes
+  /// while playing in the background (the queue's position goes up, and pauses and song changes are sent at once);
+  /// otherwise every 15 minutes, for changes made on other devices.
   @visibleForTesting
   static bool pollDue({
     required bool playing,
@@ -70,11 +75,10 @@ class ServerSyncService {
     DateTime? unsentUntil,
     required DateTime now,
   }) =>
-      playing ||
       foreground ||
       (unsentUntil != null && now.isBefore(unsentUntil)) ||
       lastPoll == null ||
-      now.difference(lastPoll) >= const Duration(minutes: 15) ||
+      now.difference(lastPoll) >= (playing ? const Duration(minutes: 3) : const Duration(minutes: 15)) ||
       now.isBefore(lastPoll);
   int _claim = 0, _sentClaim = 0;
   String? _account;
@@ -167,17 +171,14 @@ class ServerSyncService {
         device = const Uuid().v4();
         await _prefs.setString('hub.device', device);
       }
+      final hashed = <String, String>{};
       final history = _uploads.pendingHistory(
         GetIt.instance<PlaybackHistoryService>().history.reversed
             .where((play) => !play.startTime.isBefore(_historySince))
             .take(200)
             .map(
               (play) => <String, Object>{
-                'id': sha256
-                    .convert(
-                      utf8.encode('$device:${play.item.baseItem.id.raw}:${play.startTime.millisecondsSinceEpoch}'),
-                    )
-                    .toString(),
+                'id': _playId(hashed, '$device:${play.item.baseItem.id.raw}:${play.startTime.millisecondsSinceEpoch}'),
                 'song': play.item.baseItem.id.raw,
                 'startedMs': play.startTime.millisecondsSinceEpoch,
                 'playedMs': (play.playDuration?.inMilliseconds ?? 0).clamp(0, 86400000),
@@ -185,6 +186,7 @@ class ServerSyncService {
             )
             .toList(),
       );
+      _playIds = hashed;
       if (history.isNotEmpty) {
         await hub.request('POST', '/api/sync/history', body: {'items': history});
         _uploads.acknowledgeHistory(history);
@@ -234,6 +236,11 @@ class ServerSyncService {
       }
     }
   }
+
+  // The same plays come round on every poll: each one's id is hashed once, while it's among those sent.
+  var _playIds = <String, String>{};
+  String _playId(Map<String, String> hashed, String play) =>
+      hashed[play] = _playIds[play] ?? sha256.convert(utf8.encode(play)).toString();
 
   void _succeeded(int pauses) {
     _retries.succeeded();

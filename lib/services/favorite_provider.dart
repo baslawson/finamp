@@ -1,6 +1,7 @@
 import 'package:finamp/services/music_player_background_task.dart';
 import 'package:finamp/services/queue_service.dart';
 import 'package:finamp/l10n/app_localizations.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:get_it/get_it.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
@@ -112,5 +113,39 @@ class IsFavorite extends _$IsFavorite {
       await _initializing;
     }
     updateFavorite(!state);
+  }
+}
+
+/// The current track's favourite, for the playback state the player sends many times a song. Listening keeps it loaded
+/// while the track plays, rather than parsing the track again and (for downloaded tracks) asking the server anew each
+/// time; [onChange] runs when it changes, so the notification shows it at once.
+class CurrentFavorite {
+  CurrentFavorite(this._container, this._onChange);
+  final ProviderContainer _container;
+  final void Function() _onChange;
+  Object? _id;
+  ProviderSubscription<bool>? _subscription;
+
+  /// Whether the track with [itemJson] (a media item's "itemJson") is a favourite.
+  bool read(Map<String, dynamic>? itemJson) {
+    final id = itemJson?["Id"];
+    if (itemJson == null || id == null) {
+      close();
+      return false;
+    }
+    if (id != _id || _subscription == null) {
+      final previous = _subscription;
+      _id = id;
+      _subscription = _container.listen(isFavoriteProvider(BaseItemDto.fromJson(itemJson)), (_, _) => _onChange());
+      // Closed after listening anew, so the same song's state isn't dropped in between.
+      previous?.close();
+    }
+    return _subscription!.read();
+  }
+
+  void close() {
+    _subscription?.close();
+    _subscription = null;
+    _id = null;
   }
 }

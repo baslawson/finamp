@@ -129,8 +129,6 @@ class LandmarkIndex:
         self.path = path
         self.lock = threading.Lock()
         self.connection = self._connect()
-        # The scan's writes go faster with more of the index at hand: 256 MB.
-        self.connection.execute("PRAGMA cache_size=-262144")
         with self.connection:
             # [n] is never reused (AUTOINCREMENT), so a hash can't be taken for a newer track's.
             self.connection.execute(
@@ -150,6 +148,14 @@ class LandmarkIndex:
         connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=NORMAL")
         return connection
+
+    def scanning(self, active: bool):
+        """The scan's writes go faster with more of the index at hand: 256 MB while it runs, SQLite's usual 2 MB
+        between scans."""
+        with self.lock:
+            self.connection.execute(f"PRAGMA cache_size={-262144 if active else -2000}")
+            if not active:
+                self.connection.execute("PRAGMA shrink_memory")
 
     def current(self, track_id: str, mtime: float, retry_days: float) -> bool:
         """Whether [track_id] is indexed as of [mtime]; a file that failed is tried again after [retry_days]."""

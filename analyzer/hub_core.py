@@ -150,7 +150,20 @@ DEFAULTS = {
 }
 
 
+class Connection(sqlite3.Connection):
+    """Commits (or rolls back) and closes at the end of its `with` block, rather than when it's garbage collected."""
+
+    def __exit__(self, *error):
+        try:
+            return super().__exit__(*error)
+        finally:
+            self.close()
+
+
 class Store:
+    # Finished jobs are kept this long for the admin page's history.
+    JOB_DAYS = 30
+
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -186,9 +199,17 @@ class Store:
         os.chmod(self.path, 0o600)
 
     def connect(self):
-        db = sqlite3.connect(self.path, timeout=20)
+        db = sqlite3.connect(self.path, timeout=20, factory=Connection)
         db.row_factory = sqlite3.Row
         return db
+
+    def prune(self):
+        """Drops finished jobs older than [JOB_DAYS] and TV rooms that have expired; nothing reads them again."""
+        now = time.time()
+        with self.lock, self.connect() as db:
+            db.execute("DELETE FROM jobs WHERE state NOT IN ('queued','processing') AND updated<?",
+                (now - self.JOB_DAYS * 86400,))
+            db.execute('DELETE FROM rooms WHERE expires<?', (now,))
 
     def settings(self, fresh=False):
         with self._settings_lock:

@@ -1083,6 +1083,137 @@ class HubTests(unittest.TestCase):
         self.hub.jobs.run()
         self.hub.reports.prune.assert_called_once()
 
+    def test_the_job_loop_prunes_old_jobs_and_expired_rooms_hourly(self):
+        old, recent = time.time() - 31 * 86400, time.time() - 29 * 86400
+        with self.hub.store.connect() as db:
+            for value, state, updated in [('a', 'ready', old), ('b', 'failed', old), ('c', 'ready', recent),
+                                          ('d', 'queued', old), ('e', 'processing', old)]:
+                db.execute('INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?)', (value, 'health', value, '{}', state, '', old, updated))
+            db.execute('INSERT INTO rooms VALUES(?,?,?,?,?)', ('1' * 32, OWNER, 'n', '{}', time.time() - 1))
+            db.execute('INSERT INTO rooms VALUES(?,?,?,?,?)', ('2' * 32, OWNER, 'n', '{}', time.time() + 60))
+        self.hub.reports.prune = Mock()
+        self.hub.store.prune = Mock(wraps=self.hub.store.prune)
+        self.hub.stop_event.wait = Mock(side_effect=[False, False, True])
+        self.hub.jobs.schedule = Mock()
+        self.hub.jobs.run_one = Mock(return_value=False)
+        self.hub.jobs.run()
+        self.hub.store.prune.assert_called_once()
+        with self.hub.store.connect() as db:
+            self.assertEqual(sorted(row[0] for row in db.execute('SELECT id FROM jobs')), ['c', 'd', 'e'])
+            self.assertEqual([row[0] for row in db.execute('SELECT id FROM rooms')], ['2' * 32])
+
+    def test_store_connections_close_at_the_end_of_their_block(self):
+        with self.hub.store.connect() as db:
+            db.execute("INSERT OR REPLACE INTO settings VALUES('probe','1')")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            db.execute('SELECT 1')
+        with self.hub.store.connect() as db:
+            self.assertEqual(db.execute("SELECT value FROM settings WHERE key='probe'").fetchone()[0], '1')
+        with self.assertRaises(ValueError), self.hub.store.connect() as db:
+            db.execute("INSERT OR REPLACE INTO settings VALUES('probe','2')")
+            raise ValueError()
+        with self.assertRaises(sqlite3.ProgrammingError):
+            db.execute('SELECT 1')
+        with self.hub.store.connect() as db:
+            self.assertEqual(db.execute("SELECT value FROM settings WHERE key='probe'").fetchone()[0], '1')
+
+    def test_sync_polls_of_a_known_account_only_read(self):
+        self.hub.sync.read(OWNER)
+        with patch.object(Store, 'user', side_effect=AssertionError('wrote')):
+            self.assertIn('configTag', self.hub.sync.read(OWNER))
+        # A new account is still created on first sight.
+        self.assertEqual(self.hub.sync.read(SECOND)['revision'], 0)
+
+    def test_a_tv_waiting_for_its_song_asks_the_worker_every_15_seconds(self):
+        room = self.room()
+        self.command(room, 'select', song=SONG)
+        self.hub.karaoke.reset_mock()
+        self.hub.karaoke.return_value = {'state': 'processing'}
+        clock = [1000.0]
+        with patch('hub.time.monotonic', side_effect=lambda: clock[0]):
+            for elapsed in (0, 2, 4, 14):
+                clock[0] = 1000.0 + elapsed
+                self.hub.refresh_rooms()
+            self.assertEqual(self.hub.karaoke.call_count, 1)
+            clock[0] = 1016.0
+            self.hub.refresh_rooms()
+            self.assertEqual(self.hub.karaoke.call_count, 2)
+            # Another song is asked about at once.
+            self.command(room, 'select', 1, song=SECOND)
+            self.hub.karaoke.reset_mock()
+            self.hub.refresh_rooms()
+            self.assertEqual(self.hub.karaoke.call_count, 1)
+            # A worker that can't be reached is asked again on the next round.
+            self.hub.karaoke.side_effect = HTTPException(503, 'away')
+            clock[0] = 1040.0
+            self.hub.refresh_rooms()
+            self.hub.refresh_rooms()
+            self.assertEqual(self.hub.karaoke.call_count, 3)
+
+    def test_room_preparation_writes_the_room_only_when_it_changes(self):
+        room = self.room()
+        self.command(room, 'select', song=SONG)
+        self.hub.karaoke.return_value = {'state': 'processing'}
+        self.hub.prepare_room(room['id'])
+        statements, connect = [], self.hub.store.connect
+        def traced():
+            db = connect()
+            db.set_trace_callback(statements.append)
+            return db
+        with patch.object(self.hub.store, 'connect', side_effect=traced):
+            self.hub.prepare_room(room['id'])
+            self.assertFalse([text for text in statements if text.startswith('UPDATE rooms')])
+            self.hub.karaoke.return_value = {'state': 'failed'}
+            self.hub.prepare_room(room['id'])
+            self.assertTrue([text for text in statements if text.startswith('UPDATE rooms')])
+
+    def test_backups_use_fast_compression(self):
+        native = self.root / 'native'
+        native.mkdir()
+        path = native / 'jellyfin-backup-test.zip'
+        with zipfile.ZipFile(path, 'w') as archive: archive.writestr('config.xml', '<config/>')
+        self.jf.json.return_value = {'Path': '/config/backups/' + path.name}
+        with patch.dict(os.environ, {'JELLYFIN_BACKUP_DIR': str(native)}):
+            self.hub.jobs.backup({'reason': 'test'})
+        with self.hub.store.connect() as db: backup = db.execute('SELECT * FROM backups').fetchone()
+        self.assertIsNotNone(backup['verified'])
+        # Gzip's header says which level wrote it: 4 is the fastest, 2 the smallest.
+        self.assertEqual((self.hub.store.root / 'backups' / backup['name']).read_bytes()[8], 4)
+
+    def test_cleanup_counts_tv_audio_towards_the_budget_and_removes_it_with_its_mixes(self):
+        root = self.root / 'karaoke'
+        root.mkdir()
+        media = self.hub.store.root / 'media'
+        media.mkdir()
+        self.hub.store.save_settings({'nightlySongs': [], 'nightlyFavorites': False, 'cacheDays': 365, 'cacheGB': 1})
+        with sqlite3.connect(root / 'jobs.db') as db:
+            db.execute('CREATE TABLE jobs(id TEXT,revision TEXT,state TEXT,queued REAL)')
+            for value, version, used in [(SONG, 'e' * 64, 1000), (SECOND, 'f' * 64, 2000)]:
+                directory = root / version
+                directory.mkdir()
+                (directory / 'mix-0.flac').write_bytes(b'cache')
+                marker = directory / '.last-used'
+                marker.touch()
+                os.utime(marker, (time.time() - used, time.time() - used))
+                db.execute('INSERT INTO jobs VALUES(?,?,?,?)', (value, version, 'ready', 1))
+        # Only the TV audio takes the cache past its gigabyte.
+        with open(media / f'{"f" * 64}-0.mp3', 'wb') as audio:
+            audio.truncate(1024 ** 3)
+        def delete(method, path, **kwargs):
+            if method == 'DELETE':
+                k = root / kwargs['params']['revision']
+                for file in k.iterdir():
+                    file.unlink()
+                k.rmdir()
+            return {}
+        self.hub.karaoke.side_effect = delete
+        self.hub.jobs.cleanup({})
+        deleted = [call.kwargs['params']['revision'] for call in self.hub.karaoke.call_args_list if call.args[0] == 'DELETE']
+        # The least recently used goes first, and with it gone the cache is within budget.
+        self.assertEqual(deleted, ['f' * 64])
+        self.assertEqual(list(media.iterdir()), [])
+        self.assertTrue((root / ('e' * 64)).is_dir())
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -16,8 +16,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 import 'package:get_it/get_it.dart';
 
-final _analyzerConfiguredProvider = FutureProvider.autoDispose((ref) => AnalyzerService.isConfigured());
-
 /// For the song playing: offers a few songs that would follow on well from it (sounding alike, in a matching key and
 /// tempo) to play next, without changing the rest of the queue.
 class GoodMatchNextMenuEntry extends ConsumerWidget implements HideableMenuEntry {
@@ -27,7 +25,7 @@ class GoodMatchNextMenuEntry extends ConsumerWidget implements HideableMenuEntry
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final configured = ref.watch(_analyzerConfiguredProvider).valueOrNull ?? false;
+    final configured = ref.watch(analyzerConfiguredProvider).valueOrNull ?? false;
     if (!configured || baseItem.type != "Audio") return const SizedBox.shrink();
     final offline = ref.watch(finampSettingsProvider.isOffline);
     return MenuEntry(

@@ -14,8 +14,6 @@ import 'package:get_it/get_it.dart';
 import '../../../extensions/localizations.dart';
 import '../../../services/finamp_settings_helper.dart';
 
-final _analyzerConfiguredProvider = FutureProvider.autoDispose((ref) => AnalyzerService.isConfigured());
-
 /// Plays songs that sound like this one, judged by the analyzer from the audio itself rather than by tags.
 class MoreLikeThisMenuEntry extends ConsumerWidget implements HideableMenuEntry {
   final BaseItemDto baseItem;
@@ -24,7 +22,7 @@ class MoreLikeThisMenuEntry extends ConsumerWidget implements HideableMenuEntry 
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final configured = ref.watch(_analyzerConfiguredProvider).valueOrNull ?? false;
+    final configured = ref.watch(analyzerConfiguredProvider).valueOrNull ?? false;
     if (!configured || baseItem.type != "Audio") return const SizedBox.shrink();
     final offline = ref.watch(finampSettingsProvider.isOffline);
     return MenuEntry(

@@ -15,7 +15,48 @@ public final class TruePeakLimiterTest {
         }
         peakCappedNormalization();
         realOvershoots();
-        System.out.println("True-peak limiter: phase-shifted tones, stereo, tails, exact bypass, peak-capped normalization and real overshoots passed at three rates");
+        quietSkip();
+        System.out.println("True-peak limiter: phase-shifted tones, stereo, tails, exact bypass, peak-capped normalization, real overshoots and the quiet-audio detector skip passed at three rates");
+    }
+
+    /** The detector may skip its filters only where it can't matter: when the true peak is within the ceiling anyway. */
+    private static void quietSkip() {
+        double ceiling = Math.pow(10, -1.0 / 20);
+        // The worst case for each phase: samples whose signs follow its coefficients add up to amplitude * sum |c|.
+        for (double[] phase : TruePeakDetector.FILTER) {
+            double sum = 0;
+            for (double coefficient : phase) sum += Math.abs(coefficient);
+            float amplitude = (float) (ceiling / (sum * 0.995));
+            TruePeakDetector fast = new TruePeakDetector(2), exact = new TruePeakDetector(2);
+            double peak = 0;
+            for (int age = TruePeakDetector.TAPS - 1; age >= 0; age--) {
+                float sample = phase[age] < 0 ? -amplitude : amplitude;
+                float[] frame = {sample, sample};
+                peak = sameDecision(fast.push(frame, ceiling), exact.push(frame), ceiling);
+            }
+            assert peak > ceiling : "fixture must reach over the ceiling only between samples";
+        }
+        // Noise around the threshold, at several ceilings: quiet stretches must be skipped, the rest must not change.
+        java.util.Random random = new java.util.Random(3);
+        int skipped = 0;
+        for (double limit : new double[] {ceiling, Math.pow(10, -7.0 / 20), 1}) {
+            TruePeakDetector fast = new TruePeakDetector(2), exact = new TruePeakDetector(2);
+            for (int i = 0; i < 200_000; i++) {
+                double level = (i / 1000) % 4 == 0 ? 1.1 : (i / 1000) % 4 == 1 ? .45 : .2;
+                float[] frame = i % 5000 == 4999 ? null
+                        : new float[] {(float) (random.nextGaussian() * level / 3), (float) (random.nextGaussian() * level / 3)};
+                double a = fast.push(frame, limit), b = frame == null ? exact.push(null) : exact.push(frame);
+                sameDecision(a, b, limit);
+                if (a != b) skipped++;
+            }
+        }
+        assert skipped > 100_000 : "quiet audio should skip the filters, skipped " + skipped;
+    }
+
+    private static double sameDecision(double fast, double exact, double ceiling) {
+        assert fast == exact || (fast <= ceiling && exact <= ceiling)
+                : "skipped a true peak of " + exact + " over the ceiling " + ceiling + " (reported " + fast + ")";
+        return exact;
     }
 
     private static void peakCappedNormalization() {

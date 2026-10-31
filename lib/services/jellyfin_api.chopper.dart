@@ -25,7 +25,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -37,7 +37,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -49,7 +49,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -61,7 +61,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -79,7 +79,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -103,7 +103,7 @@ final class _$JellyfinApi extends JellyfinApi {
     return client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
   }
 
@@ -117,7 +117,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -132,7 +132,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -153,7 +153,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -184,7 +184,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -196,7 +196,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -208,7 +208,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -220,7 +220,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -287,7 +287,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -318,7 +318,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -347,7 +347,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -376,7 +376,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -391,7 +391,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -406,7 +406,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -421,7 +421,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -442,7 +442,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -458,7 +458,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -587,7 +587,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -600,7 +600,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -670,7 +670,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Request $request = Request('GET', $url, client.baseUrl);
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -714,7 +714,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -766,7 +766,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -808,7 +808,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -823,7 +823,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -838,7 +838,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }
@@ -850,7 +850,7 @@ final class _$JellyfinApi extends JellyfinApi {
     final Response $response = await client.send<dynamic, dynamic>(
       $request,
       requestConverter: JsonConverter.requestFactory,
-      responseConverter: JsonConverter.responseFactory,
+      responseConverter: IsolateJson.responseFactory,
     );
     return $response.bodyOrThrow;
   }

@@ -1,6 +1,5 @@
 package com.ryanheise.just_audio;
 
-import java.util.ArrayDeque;
 import java.util.Collections;
 import java.util.Set;
 import java.util.WeakHashMap;
@@ -59,28 +58,49 @@ public final class Spectrum {
         private final double[] im = new double[SIZE];
         private int filled;
         private int sinceLast;
-        private int sampleRate = 44100;
-        private final ArrayDeque<Long> times = new ArrayDeque<>();
-        private final ArrayDeque<float[]> frames = new ArrayDeque<>();
-        private float[] shown;
+        private static final int QUEUE = 200;
+        // Each band's FFT bins for the current sample rate, worked out once in configure().
+        private final int[] firstBin = new int[BANDS];
+        private final int[] lastBin = new int[BANDS];
+        // Frames waiting to be heard, oldest at queueStart: a fixed ring, so analysing allocates nothing.
+        private final long[] times = new long[QUEUE];
+        private final float[][] frames = new float[QUEUE][BANDS];
+        private int queueStart, queued;
+        private final float[] bands = new float[BANDS];
+        private final float[] shown = new float[BANDS];
+        private boolean hasShown;
         private long shownAt;
 
         Analyzer() {
             for (int i = 0; i < SIZE; i++) window[i] = (float) (0.5 - 0.5 * Math.cos(2 * Math.PI * i / (SIZE - 1)));
+            bins(44100);
             register(this);
         }
 
         void configure(int sampleRate) {
-            this.sampleRate = sampleRate;
+            bins(sampleRate);
             reset();
+        }
+
+        private void bins(int sampleRate) {
+            double low = 40;
+            double high = Math.min(16000, sampleRate / 2.0);
+            double ratio = Math.pow(high / low, 1.0 / BANDS);
+            double binWidth = (double) sampleRate / SIZE;
+            for (int band = 0; band < BANDS; band++) {
+                double from = low * Math.pow(ratio, band);
+                double to = from * ratio;
+                firstBin[band] = Math.max(1, (int) Math.floor(from / binWidth));
+                lastBin[band] = Math.max(firstBin[band], Math.min(SIZE / 2 - 1, (int) Math.ceil(to / binWidth)));
+            }
         }
 
         void reset() {
             filled = 0;
             sinceLast = 0;
             synchronized (this) {
-                times.clear();
-                frames.clear();
+                queueStart = 0;
+                queued = 0;
             }
         }
 
@@ -90,49 +110,46 @@ public final class Spectrum {
             if (filled >= 1 << 30) filled = SIZE + filled % SIZE; // keep the index from overflowing
             if (++sinceLast >= HOP && filled >= SIZE) {
                 sinceLast = 0;
-                float[] bands = analyse();
+                analyse();
                 synchronized (this) {
-                    // Frames are made ahead of playback: keep each one until it's heard.
-                    times.addLast(System.nanoTime() + LATENCY_NANOS);
-                    frames.addLast(bands);
-                    while (frames.size() > 200) {
-                        times.removeFirst();
-                        frames.removeFirst();
+                    // Frames are made ahead of playback: keep each one until it's heard. When full, drop the oldest.
+                    if (queued == QUEUE) {
+                        if (++queueStart == QUEUE) queueStart = 0;
+                        queued--;
                     }
+                    int slot = queueStart + queued;
+                    if (slot >= QUEUE) slot -= QUEUE;
+                    times[slot] = System.nanoTime() + LATENCY_NANOS;
+                    System.arraycopy(bands, 0, frames[slot], 0, BANDS);
+                    queued++;
                 }
             }
         }
 
         /** The newest frame that should be heard by now, or null when this player is quiet or stopped. */
         synchronized float[] due(long now) {
-            while (!times.isEmpty() && times.peekFirst() <= now) {
-                times.removeFirst();
-                shown = frames.removeFirst();
+            while (queued > 0 && times[queueStart] <= now) {
+                System.arraycopy(frames[queueStart], 0, shown, 0, BANDS);
+                hasShown = true;
                 shownAt = now;
+                if (++queueStart == QUEUE) queueStart = 0;
+                queued--;
             }
-            if (shown == null || now - shownAt > 250_000_000L) return null;
+            if (!hasShown || now - shownAt > 250_000_000L) return null;
             return shown;
         }
 
-        private float[] analyse() {
+        /** Band levels of the last SIZE samples, into [bands]. */
+        private void analyse() {
             int start = filled - SIZE;
             for (int i = 0; i < SIZE; i++) {
                 re[i] = ring[(start + i) % SIZE] * window[i];
                 im[i] = 0;
             }
             fft(re, im);
-            float[] bands = new float[BANDS];
-            double low = 40;
-            double high = Math.min(16000, sampleRate / 2.0);
-            double ratio = Math.pow(high / low, 1.0 / BANDS);
-            double binWidth = (double) sampleRate / SIZE;
             for (int band = 0; band < BANDS; band++) {
-                double from = low * Math.pow(ratio, band);
-                double to = from * ratio;
-                int first = Math.max(1, (int) Math.floor(from / binWidth));
-                int last = Math.max(first, Math.min(SIZE / 2 - 1, (int) Math.ceil(to / binWidth)));
                 double energy = 0;
-                for (int bin = first; bin <= last; bin++) {
+                for (int bin = firstBin[band]; bin <= lastBin[band]; bin++) {
                     energy = Math.max(energy, re[bin] * re[bin] + im[bin] * im[bin]);
                 }
                 // A Hann-windowed full-scale sine peaks at SIZE / 4.
@@ -142,7 +159,6 @@ public final class Spectrum {
                 decibels += 9.0 * band / BANDS;
                 bands[band] = (float) Math.max(0, Math.min(1, (decibels + 60) / 54));
             }
-            return bands;
         }
 
         private static void fft(double[] re, double[] im) {

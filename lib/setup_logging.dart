@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:finamp/components/global_snackbar.dart';
 import 'package:finamp/services/censored_log.dart';
 import 'package:finamp/services/finamp_settings_helper.dart';
@@ -23,12 +25,16 @@ Future<void> setupLogging() async {
 
   final startupLogger = Logger("Startup");
 
-  // Create and store the Log instance for later use
-  final metadata = await EnvironmentMetadata.create(
-    fetchServerInfo:
-        false, // we can't fetch server info yet, because the user helper isn't set up yet. it's also faster to skip this here
+  // Only for the log, so startup doesn't wait for it.
+  unawaited(
+    EnvironmentMetadata.create(
+      fetchServerInfo:
+          false, // we can't fetch server info yet, because the user helper isn't set up yet. it's also faster to skip this here
+    ).then(
+      (metadata) => startupLogger.info("\n${metadata.pretty}"),
+      onError: (Object error, StackTrace stack) => startupLogger.warning("Couldn't read the device info", error, stack),
+    ),
   );
-  startupLogger.info("\n${metadata.pretty}");
 }
 
 void performDebugLogPrinting(LogRecord event) {

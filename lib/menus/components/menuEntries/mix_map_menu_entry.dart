@@ -6,15 +6,13 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 
-final _analyzerConfiguredProvider = FutureProvider.autoDispose((ref) => AnalyzerService.isConfigured());
-
 /// Opens the [MixMapScreen] for the queue. Needs the analyzer, which knows each song's key and tempo.
 class MixMapMenuEntry extends ConsumerWidget implements HideableMenuEntry {
   const MixMapMenuEntry({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    if (!(ref.watch(_analyzerConfiguredProvider).valueOrNull ?? false)) return const SizedBox.shrink();
+    if (!(ref.watch(analyzerConfiguredProvider).valueOrNull ?? false)) return const SizedBox.shrink();
     return MenuEntry(
       icon: TablerIcons.chart_line,
       title: context.l10n.mixMap,

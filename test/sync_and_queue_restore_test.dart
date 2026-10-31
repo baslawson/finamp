@@ -22,10 +22,16 @@ void main() {
     expect(QueueService.unshuffle(<String>[], <int>[]), isEmpty);
   });
 
-  test('hub sync polls every 30 seconds while playing or on screen, otherwise every 15 minutes', () {
+  test('hub sync polls every 30 seconds on screen, every 3 minutes playing in the background, else every 15', () {
     final now = DateTime(2026, 10, 27, 12);
     final recently = now.subtract(const Duration(seconds: 30));
-    expect(ServerSyncService.pollDue(playing: true, foreground: false, lastPoll: recently, now: now), isTrue);
+    expect(ServerSyncService.pollDue(playing: true, foreground: true, lastPoll: recently, now: now), isTrue);
+    expect(ServerSyncService.pollDue(playing: true, foreground: false, lastPoll: recently, now: now), isFalse);
+    final almost = now.subtract(const Duration(minutes: 2, seconds: 59));
+    expect(ServerSyncService.pollDue(playing: true, foreground: false, lastPoll: almost, now: now), isFalse);
+    final three = now.subtract(const Duration(minutes: 3));
+    expect(ServerSyncService.pollDue(playing: true, foreground: false, lastPoll: three, now: now), isTrue);
+    expect(ServerSyncService.pollDue(playing: false, foreground: false, lastPoll: three, now: now), isFalse);
     expect(ServerSyncService.pollDue(playing: false, foreground: true, lastPoll: recently, now: now), isTrue);
     expect(ServerSyncService.pollDue(playing: false, foreground: false, lastPoll: recently, now: now), isFalse);
     final earlier = now.subtract(const Duration(minutes: 14, seconds: 59));

@@ -8,6 +8,7 @@ import 'package:finamp/menus/components/menuEntries/good_match_next_menu_entry.d
 import 'package:finamp/menus/components/menuEntries/mix_map_menu_entry.dart';
 import 'package:finamp/menus/components/menuEntries/listening_choices_menu_entry.dart';
 import 'package:finamp/menus/components/menuEntries/prepare_karaoke_menu_entry.dart';
+import 'package:finamp/services/analyzer_service.dart';
 import 'package:finamp/services/karaoke_service.dart';
 
 import 'package:finamp/components/PlayerScreen/queue_list.dart';

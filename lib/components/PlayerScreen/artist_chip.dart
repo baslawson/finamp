@@ -4,14 +4,12 @@ import 'package:finamp/models/finamp_models.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/semantics.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:get_it/get_it.dart';
 import 'package:riverpod_annotation/riverpod_annotation.dart';
 
 import '../../models/jellyfin_models.dart';
 import '../../screens/artist_screen.dart';
-import '../../services/downloads_service.dart';
 import '../../services/finamp_settings_helper.dart';
-import '../../services/jellyfin_api_helper.dart';
+import '../../services/item_by_id_provider.dart';
 import '../album_image.dart';
 
 part 'artist_chip.g.dart';
@@ -21,15 +19,9 @@ const _borderRadius = BorderRadius.all(_radius);
 const _height = 24.0; // I'm sure this magic number will work on all devices
 final _defaultBackgroundColour = Colors.white.withValues(alpha: 0.1);
 
+/// The artist, from [itemByIdProvider], which keeps it a while: chips come and go with each song.
 @riverpod
-Future<BaseItemDto?> artistItem(Ref ref, BaseItemId id) async {
-  final jellyfinApiHelper = GetIt.instance<JellyfinApiHelper>();
-  final isarDownloader = GetIt.instance<DownloadsService>();
-  final bool isOffline = ref.watch(finampSettingsProvider.isOffline);
-  return isOffline
-      ? isarDownloader.getCollectionInfo(id: id).then((value) => value?.baseItem)
-      : jellyfinApiHelper.getItemById(id);
-}
+Future<BaseItemDto?> artistItem(Ref ref, BaseItemId id) => ref.watch(itemByIdProvider(id).future);
 
 class ArtistChips extends StatelessWidget {
   const ArtistChips({super.key, this.backgroundColor, this.color, this.baseItem, this.artistType = ArtistType.artist});

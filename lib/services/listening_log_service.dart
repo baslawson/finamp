@@ -115,7 +115,9 @@ class ListeningLogService {
     ScrobbleService.onListen(entry, total);
     _pending = _pending.then((_) async {
       try {
-        await (await _file).writeAsString("${jsonEncode(entry.toJson())}\n", mode: FileMode.append, flush: true);
+        final file = await _file, line = "${jsonEncode(entry.toJson())}\n";
+        await file.writeAsString(line, mode: FileMode.append, flush: true);
+        await _appendLoaded(file, entry, utf8.encode(line).length);
         StatsWidgetService.scheduleRefresh();
       } catch (e) {
         _logger.warning("Failed to log listen of '${entry.track}'", e);
@@ -123,24 +125,52 @@ class ListeningLogService {
     });
   }
 
+  /// The log as last read, with the file's path, size and time then: several features read the whole log, and
+  /// parsing it each time is costly. Read again when the file has changed other than by [record].
+  static ({String path, int size, DateTime modified, List<ListenEntry> entries})? _loaded;
+
   /// All logged listens, oldest first.
   static Future<List<ListenEntry>> load({bool forLearning = false}) async {
     await _pending;
     final file = await _file;
-    if (!await file.exists()) return [];
-    // A year of listens is tens of thousands of lines, so parse them off the UI thread.
-    return Isolate.run(() {
-      final entries = <ListenEntry>[];
-      for (final line in file.readAsLinesSync()) {
-        if (line.trim().isEmpty) continue;
-        try {
-          final entry = ListenEntry.fromJson(jsonDecode(line) as Map<String, dynamic>);
-          if (!forLearning || !entry.excludedFromLearning) entries.add(entry);
-        } catch (_) {
-          // Skip a line cut short by the app being killed mid-write.
+    final stat = await file.stat();
+    if (stat.type == FileSystemEntityType.notFound) {
+      _loaded = null;
+      return [];
+    }
+    var loaded = _loaded;
+    if (loaded == null || loaded.path != file.path || loaded.size != stat.size || loaded.modified != stat.modified) {
+      // A year of listens is tens of thousands of lines, so parse them off the UI thread.
+      final entries = await Isolate.run(() {
+        final entries = <ListenEntry>[];
+        for (final line in file.readAsLinesSync()) {
+          if (line.trim().isEmpty) continue;
+          try {
+            entries.add(ListenEntry.fromJson(jsonDecode(line) as Map<String, dynamic>));
+          } catch (_) {
+            // Skip a line cut short by the app being killed mid-write.
+          }
         }
-      }
-      return entries;
-    });
+        return entries;
+      });
+      _loaded = loaded = (path: file.path, size: stat.size, modified: stat.modified, entries: entries);
+    }
+    // A list of its own, so a caller changing it doesn't change what the next one gets.
+    return [
+      for (final entry in loaded.entries)
+        if (!forLearning || !entry.excludedFromLearning) entry,
+    ];
+  }
+
+  /// Adds [entry], just written to the end of [file] in [bytes], to the log as last read when that was all the file
+  /// held before; otherwise the log is read again next time.
+  static Future<void> _appendLoaded(File file, ListenEntry entry, int bytes) async {
+    final loaded = _loaded;
+    if (loaded == null) return;
+    _loaded = null;
+    if (loaded.path != file.path) return;
+    final stat = await file.stat();
+    if (stat.size != loaded.size + bytes) return;
+    _loaded = (path: file.path, size: stat.size, modified: stat.modified, entries: [...loaded.entries, entry]);
   }
 }

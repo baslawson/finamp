@@ -234,9 +234,18 @@ class TrackListTile extends ConsumerWidget {
         sourcedParent = parentPlayable;
       }
 
-      PlayableSlice slice = await ref.watch(
+      // Listened to rather than watched, which would rebuild the tile on every change, but not just read, so the
+      // slice isn't thrown away while it loads.
+      final sliceSubscription = ref.listenManual(
         getPlayableSliceProvider(item: sourcedParent, startingOffset: index!, chosen: item.id).future,
+        (_, _) {},
       );
+      final PlayableSlice slice;
+      try {
+        slice = await sliceSubscription.read();
+      } finally {
+        sliceSubscription.close();
+      }
 
       // avoid radio eagerly adding new tracks from cache (or requesting new tracks) before lazy loading of additional tracks completes
       final previousRadioState = FinampSettingsHelper.finampSettings.radioEnabled;

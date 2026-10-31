@@ -44,10 +44,13 @@ class Jobs:
     def run(self):
         lower_worker_priority()
         self.remove_abandoned_backups()
-        logged = float('-inf')
+        logged = pruned = float('-inf')
         while not self.hub.stop_event.wait(2):
             try:
                 self.hub.reports.prune()
+                if time.monotonic() - pruned > 3600:
+                    self.hub.store.prune()
+                    pruned = time.monotonic()
                 self.schedule()
                 self.run_one()
             except Exception as error:
@@ -359,6 +362,9 @@ class Jobs:
             if directory.parent != root.resolve() or not directory.is_dir() or (root / version).is_symlink():
                 continue
             size = sum(path.stat().st_size for path in directory.iterdir() if path.is_file() and not path.is_symlink())
+            # The TV's browser audio made from these mixes is removed with them, so it counts towards their size.
+            size += sum(path.stat().st_size for path in (self.hub.store.root / 'media').glob(f'{version}-*.mp3')
+                        if path.is_file() and not path.is_symlink())
             if version not in counted:
                 total += size
                 counted.add(version)
@@ -435,7 +441,8 @@ class Jobs:
             try:
                 with open(target, 'xb') as output:
                     os.chmod(target, 0o600)
-                    with tarfile.open(fileobj=output, mode='w:gz') as archive:
+                    # The Jellyfin backup inside is already compressed: the fastest level saves most of the time.
+                    with tarfile.open(fileobj=output, mode='w:gz', compresslevel=1) as archive:
                         archive.add(stage / 'manifest.json', arcname='manifest.json')
                         archive.add(files, arcname='files')
                 self.verify_archive(target, self.hub.store.root)

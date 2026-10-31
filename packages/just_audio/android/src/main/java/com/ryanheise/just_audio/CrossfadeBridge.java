@@ -36,9 +36,9 @@ public final class CrossfadeBridge {
     static synchronized void unregisterOutputPump(String id) { outputPumps.remove(id); }
     static synchronized long outputLeadMillis(String id, Long positionMs) {
         if (positionMs == null) return 250;
-        Long rendered = renderedUntilUs.get(id);
+        long rendered = renderedUntilUs(id);
         long endMs = id != null && id.equals(mainId) && status == CATCHING_UP && mainFormat != null
-                ? readFrames * 1000 / mainFormat.sampleRate : rendered == null ? -1 : rendered / 1000;
+                ? readFrames * 1000 / mainFormat.sampleRate : rendered == C.TIME_UNSET ? -1 : rendered / 1000;
         return endMs < 0 ? 250 : Math.max(0, Math.min(600, endMs - positionMs));
     }
 
@@ -128,7 +128,8 @@ public final class CrossfadeBridge {
 
     /** The current format of every player's sound, by player id. */
     private static final Map<String, AudioFormat> formats = new HashMap<>();
-    private static final Map<String, Long> renderedUntilUs = new HashMap<>();
+    // How far each player has rendered, C.TIME_UNSET when not known. Updated in place for every buffer: no boxing.
+    private static final Map<String, long[]> renderedUntilUs = new HashMap<>();
     private static AudioFormat mainFormat;
     private static AudioFormat nextFormat;
 
@@ -210,8 +211,8 @@ public final class CrossfadeBridge {
     public static synchronized int scheduleMix(long startUs, long endUs, double incomingGain) {
         if (fadeStartUs != C.TIME_UNSET && status == MIXING) return 1;
         if (status != ARMED || endUs <= startUs || startUs < 0) return -1;
-        Long rendered = renderedUntilUs.get(mainId);
-        if (rendered == null) return 0;
+        long rendered = renderedUntilUs(mainId);
+        if (rendered == C.TIME_UNSET) return 0;
         if (rendered > startUs) return -1;
         AudioFormat next = formats.get(nextId);
         if (next == null || writtenFrames * 1000L < (long) PRIMING_MILLIS * next.sampleRate) return 0;
@@ -225,12 +226,26 @@ public final class CrossfadeBridge {
     }
 
     static synchronized void onPcmTime(String id, long endUs) {
-        if (endUs != C.TIME_UNSET) renderedUntilUs.put(id, endUs);
+        if (endUs != C.TIME_UNSET) {
+            long[] rendered = renderedUntilUs.get(id);
+            if (rendered == null) renderedUntilUs.put(id, rendered = new long[1]);
+            rendered[0] = endUs;
+        }
         if (id != null && id.equals(mainId) && status == CATCHING_UP) {
             long now = nanoTime.getAsLong();
             if (lastInputNanos != 0) maxInputGapNanos = Math.max(maxInputGapNanos, now - lastInputNanos);
             lastInputNanos = now;
         }
+    }
+
+    private static long renderedUntilUs(String id) {
+        long[] rendered = renderedUntilUs.get(id);
+        return rendered == null ? C.TIME_UNSET : rendered[0];
+    }
+
+    private static void forgetRendered(String id) {
+        long[] rendered = renderedUntilUs.get(id);
+        if (rendered != null) rendered[0] = C.TIME_UNSET;
     }
 
     /** The volume of the current song ([out]) and of the next one ([in]) in the mix. */
@@ -270,7 +285,7 @@ public final class CrossfadeBridge {
         status = OFF;
         mainFormat = null;
         nextFormat = null;
-        ring = null;
+        // The ring itself is kept for the next transition: allocating megabytes on the audio thread can glitch.
         capacityFrames = 0;
         writtenFrames = 0;
         readFrames = 0;
@@ -319,7 +334,7 @@ public final class CrossfadeBridge {
 
     /** The main player seeked or stopped: whatever was going on is off. */
     static synchronized void onSinkFlush(String id) {
-        renderedUntilUs.remove(id);
+        forgetRendered(id);
         if (id != null && id.equals(mainId) && (status == MIXING || status == CATCHING_UP)) {
             Log.i(TAG, "Main player flushed during a crossfade (status " + status + ")");
             boundaryPending = false;
@@ -359,7 +374,7 @@ public final class CrossfadeBridge {
     static synchronized void onFlush(String id) {
         // A seek/new stream invalidates the old source position. Scheduling must
         // wait for freshly timestamped PCM rather than reject against stale time.
-        renderedUntilUs.remove(id);
+        forgetRendered(id);
         if (id == null || !id.equals(mainId) || !waitingForFlush) return;
         waitingForFlush = false;
         if (status == CATCHING_UP) {
@@ -383,10 +398,13 @@ public final class CrossfadeBridge {
     static synchronized void collect(ByteBuffer input, AudioFormat format) {
         int frames = input.remaining() / (format.bytesPerFrame);
         if (frames == 0) return;
-        if (ring == null) {
+        if (capacityFrames == 0) {
+            // The first sound of this transition. An earlier transition's ring is reused when it's big enough: only
+            // frames collected from now on are ever read (never more than writtenFrames), so its old contents can't
+            // be heard.
             channels = format.channelCount;
             capacityFrames = format.sampleRate * RING_SECONDS;
-            ring = new float[capacityFrames * channels];
+            if (ring == null || ring.length < capacityFrames * channels) ring = new float[capacityFrames * channels];
         }
         if (writtenFrames + frames - readFrames > capacityFrames) {
             Log.w(TAG, "Collected sound overflowed; giving up on this crossfade");
@@ -394,20 +412,25 @@ public final class CrossfadeBridge {
             return;
         }
         int position = input.position();
-        boolean isFloat = format.encoding == C.ENCODING_PCM_FLOAT;
-        for (int frame = 0; frame < frames; frame++) {
-            int base = (int) ((writtenFrames % capacityFrames) * channels);
-            for (int channel = 0; channel < channels; channel++) {
-                ring[base + channel] = isFloat
-                        ? input.getFloat(position + (frame * channels + channel) * 4)
-                        : input.getShort(position + (frame * channels + channel) * 2) / 32768f;
+        int samples = frames * channels;
+        int end = capacityFrames * channels;
+        int base = (int) (writtenFrames % capacityFrames) * channels;
+        if (format.encoding == C.ENCODING_PCM_FLOAT) {
+            for (int sample = 0; sample < samples; sample++) {
+                ring[base] = input.getFloat(position + sample * 4);
+                if (++base == end) base = 0;
             }
-            writtenFrames++;
+        } else {
+            for (int sample = 0; sample < samples; sample++) {
+                ring[base] = input.getShort(position + sample * 2) / 32768f;
+                if (++base == end) base = 0;
+            }
         }
+        writtenFrames += frames;
     }
 
     private static boolean ringHasFrame() {
-        if (ring == null) return false;
+        if (capacityFrames == 0) return false;
         long available = writtenFrames - readFrames;
         if (!primed) {
             if (available * 1000L < (long) PRIMING_MILLIS * nextFormat.sampleRate) return false;
@@ -450,13 +473,16 @@ public final class CrossfadeBridge {
     static synchronized void drain(String id, ByteBuffer output, AudioFormat format, int limit) {
         int frames = Math.min(limit, drainFrames(id));
         boolean floats = format.encoding == C.ENCODING_PCM_FLOAT;
+        // Nothing to drain may also mean nothing collected yet: no ring to index then.
+        int slot = frames > 0 ? (int) (readFrames % capacityFrames) : 0;
         for (int frame = 0; frame < frames; frame++) {
             glide();
             glideBufferedEnvelope();
-            int base = (int) ((readFrames % capacityFrames) * channels);
+            int base = slot * channels;
             for (int channel = 0; channel < channels; channel++)
                 write(output, ring[base + channel] * gainIn * incomingEnvelope, floats);
             readFrames++;
+            if (++slot == capacityFrames) slot = 0;
         }
         catchUpPlayed += frames;
         drainedFrames += frames;
@@ -519,9 +545,23 @@ public final class CrossfadeBridge {
         int frames = input.remaining() / format.bytesPerFrame;
         int position = input.position();
         if (status == MIXING) {
+            boolean scheduled = fadeStartUs != C.TIME_UNSET;
+            // Each frame's time is timeUs + frame * 1_000_000 / rate, rounded down: kept as whole microseconds plus
+            // the remainder, so no frame needs a division.
+            int rate = format.sampleRate;
+            int stepUs = 1_000_000 / rate;
+            int stepRemainder = 1_000_000 % rate;
+            long offsetUs = 0;
+            int remainder = 0;
+            int slot = capacityFrames == 0 ? 0 : (int) (readFrames % capacityFrames);
             for (int frame = 0; frame < frames; frame++) {
-                boolean scheduled = fadeStartUs != C.TIME_UNSET;
-                long sampleUs = timeUs == C.TIME_UNSET ? C.TIME_UNSET : timeUs + frame * 1_000_000L / format.sampleRate;
+                long sampleUs = timeUs == C.TIME_UNSET ? C.TIME_UNSET : timeUs + offsetUs;
+                offsetUs += stepUs;
+                remainder += stepRemainder;
+                if (remainder >= rate) {
+                    remainder -= rate;
+                    offsetUs++;
+                }
                 boolean started = !scheduled || (sampleUs != C.TIME_UNSET && sampleUs >= fadeStartUs);
                 if (scheduled) {
                     double t = started ? Math.min(1, (double) (sampleUs - fadeStartUs) / (fadeEndUs - fadeStartUs)) : 0;
@@ -536,7 +576,7 @@ public final class CrossfadeBridge {
                 // ease back in on refill instead of switching whole PCM chunks.
                 if (incoming) glideBufferedEnvelope();
                 else incomingEnvelope = 0f;
-                int base = incoming ? (int) ((readFrames % capacityFrames) * channels) : 0;
+                int base = incoming ? slot * channels : 0;
                 for (int channel = 0; channel < ch; channel++) {
                     float own = read(input, position + (frame * ch + channel) * bytesPerSample, isFloat);
                     float sample = own * gainOut;
@@ -545,7 +585,10 @@ public final class CrossfadeBridge {
                 }
                 // Scheduled fades keep their sample alignment even if decoding starves.
                 // Missing frames stay missing; a refill mustn't shift the song backwards.
-                if (incoming || (scheduled && started)) readFrames++;
+                if (incoming || (scheduled && started)) {
+                    readFrames++;
+                    if (++slot == capacityFrames) slot = 0;
+                }
             }
             input.position(input.limit());
             return true;
@@ -562,9 +605,12 @@ public final class CrossfadeBridge {
                 Log.i(TAG, "Catching up: own " + ownFrames + " of " + readFrames + " frames, "
                         + (now - catchUpStartNanos) / 1_000_000 + " ms in");
             }
+            // Where ownFrames is in the ring; nothing collected means no ring frame is read.
+            int slot = capacityFrames == 0 ? 0 : (int) (ownFrames % capacityFrames);
             for (int frame = 0; frame < frames; frame++) {
                 if (!usingMain && ownFrames < readFrames) {
                     ownFrames++;
+                    if (++slot == capacityFrames) slot = 0;
                     continue;
                 }
                 if (!usingMain) {
@@ -579,13 +625,14 @@ public final class CrossfadeBridge {
                 incomingEnvelope = Math.min(1f, incomingEnvelope + bufferFadeStep);
                 mainBlend = Math.min(1f, mainBlend + mainBlendStep);
                 boolean buffered = writtenFrames > ownFrames;
-                int base = buffered ? (int) ((ownFrames % capacityFrames) * channels) : 0;
+                int base = buffered ? slot * channels : 0;
                 for (int channel = 0; channel < ch; channel++) {
                     float own = read(input, position + (frame * ch + channel) * bytesPerSample, isFloat);
                     float sample = buffered ? ring[base + channel] * (1f - mainBlend) + own * mainBlend : own;
                     write(output, sample * gainIn * incomingEnvelope, isFloat);
                 }
                 ownFrames++;
+                if (++slot == capacityFrames) slot = 0;
                 readFrames = ownFrames;
                 // Keep processing across small buffers until every ramp is finished. DONE lets
                 // Flutter dispose the secondary decoder and makes subsequent buffers pass through.

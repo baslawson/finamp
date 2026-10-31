@@ -55,15 +55,13 @@ android {
 dependencies {
     def exoplayer_version = "1.4.1"
     implementation "androidx.media3:media3-exoplayer:$exoplayer_version"
-    implementation "androidx.media3:media3-exoplayer-dash:$exoplayer_version"
     implementation "androidx.media3:media3-exoplayer-hls:$exoplayer_version"
-    implementation "androidx.media3:media3-exoplayer-smoothstreaming:$exoplayer_version"
 }
 
 // Run the native PCM regression harnesses on the host JVM with Media3's real implementation.
 // Test.classpath carries the Android/Media3 runtime jars and their build dependencies.
 afterEvaluate {
-    def checks = ['SpectrumAudioProcessorTest', 'AudioProcessorChainTest', 'LookaheadLimiterTest', 'TruePeakLimiterTest', 'LimiterBypassTest', 'NormalizationGainTest', 'CrossfadeClockTest', 'CrossfadeMixTest', 'CrossfadeHandoverTest', 'CrossfadeTimingTest', 'CrossfadeNormalizationTest', 'CrossfadeRealtimeTest', 'VoiceEnvelopeTest'].collect { testClass ->
+    def checks = ['SpectrumAudioProcessorTest', 'AudioProcessorChainTest', 'LookaheadLimiterTest', 'TruePeakLimiterTest', 'LimiterBypassTest', 'NormalizationGainTest', 'CrossfadeClockTest', 'CrossfadeMixTest', 'CrossfadeHandoverTest', 'CrossfadeTimingTest', 'CrossfadeNormalizationTest', 'CrossfadeRealtimeTest', 'VoiceEnvelopeTest', 'LimiterEquivalenceTest'].collect { testClass ->
         tasks.register("run${testClass}", JavaExec) {
             dependsOn 'compileDebugUnitTestJavaWithJavac'
             classpath = tasks.named('testDebugUnitTest').get().classpath

@@ -14,9 +14,6 @@ import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 import 'package:get_it/get_it.dart';
 import 'package:rxdart/rxdart.dart';
 
-/// Whether the analyzer is set up, which harmonic order needs for each song's key and tempo.
-final analyzerConfiguredProvider = FutureProvider.autoDispose((ref) => AnalyzerService.isConfigured());
-
 /// Turns harmonic order for the rest of the queue on or off, saying so when too few songs are analysed for it.
 Future<void> toggleHarmonicOrder() async {
   final queueService = GetIt.instance<QueueService>();

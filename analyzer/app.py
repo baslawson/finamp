@@ -306,8 +306,10 @@ STRUCTURE_RATE = 11025
 
 def map_path(path: str) -> str:
     for source, target in PATH_MAP:
-        if path.startswith(source):
-            return target + path[len(source) :]
+        # Whole folder names only: /media/music must not take /media/music2's files.
+        source = source.rstrip("/")
+        if path == source or path.startswith(source + "/"):
+            return target.rstrip("/") + path[len(source) :]
     return path
 
 
@@ -361,10 +363,24 @@ class Index:
         self._duplicates = None
 
     def reload(self):
+        with self.lock:
+            previous = dict(self.fingerprints)
+        ids, vectors, fingerprints = [], [], []
+        digest = hashlib.sha256()
         with _db_lock:
-            rows = DB.execute(
+            # Row by row: a fingerprint that hasn't changed keeps the copy already in memory, so reloading during a
+            # scan holds the library's fingerprints once rather than twice.
+            for track_id, embedding, fingerprint in DB.execute(
                 "SELECT id, embedding, fingerprint FROM tracks WHERE error IS NULL AND embedding IS NOT NULL ORDER BY id"
-            ).fetchall()
+            ):
+                for value in (track_id.encode(), embedding, fingerprint or b''):
+                    digest.update(len(value).to_bytes(8, 'big'))
+                    digest.update(value)
+                ids.append(track_id)
+                vectors.append(np.frombuffer(embedding, dtype=np.float32))
+                if fingerprint:
+                    loaded, known = np.frombuffer(fingerprint, dtype=np.uint32), previous.get(track_id)
+                    fingerprints.append((track_id, known if known is not None and np.array_equal(known, loaded) else loaded))
             features = DB.execute(
                 "SELECT id, onset, brightness, level, bpm FROM tracks WHERE error IS NULL AND onset IS NOT NULL"
             ).fetchall()
@@ -373,22 +389,13 @@ class Index:
             [{"onset": row[1], "brightness": row[2], "level": row[3], "bpm": row[4]} for row in features]
         )
         intensity = {row[0]: value for row, value in zip(features, ranked) if value is not None}
-        digest = hashlib.sha256()
-        for row in rows:
-            for value in (row[0].encode(), row[1], row[2] or b''):
-                digest.update(len(value).to_bytes(8, 'big'))
-                digest.update(value)
         with self.lock:
             self.revision = digest.digest()
             self.intensity = intensity
-            self.ids = [row[0] for row in rows]
+            self.ids = ids
             self.positions = {track_id: i for i, track_id in enumerate(self.ids)}
-            self.embeddings = (
-                np.stack([np.frombuffer(row[1], dtype=np.float32) for row in rows])
-                if rows
-                else np.zeros((0, 512), dtype=np.float32)
-            )
-            self.fingerprints = [(row[0], np.frombuffer(row[2], dtype=np.uint32)) for row in rows if row[2]]
+            self.embeddings = np.stack(vectors) if vectors else np.zeros((0, 512), dtype=np.float32)
+            self.fingerprints = fingerprints
 
     # Rows of the similarity matrix worked out at a time: 256 against 50,000 tracks is 50 MB.
     DUPLICATE_BLOCK = 256
@@ -458,6 +465,7 @@ def scan():
             DB.executemany("DELETE FROM tracks WHERE id = ?", [(track_id,) for track_id in removed])
             DB.commit()
         LANDMARKS.remove(LANDMARKS.ids() - set(tracks))
+        LANDMARKS.scanning(True)
         log.info("Library has %d tracks (%d removed)", len(tracks), len(removed))
 
         done, marked, missing, reloaded = 0, 0, 0, time.monotonic()
@@ -518,6 +526,8 @@ def scan():
         log.info("Scan finished, %d tracks analyzed this time, %d files not found", done, missing)
     finally:
         INDEX.scanning = False
+        if LANDMARKS is not None:
+            LANDMARKS.scanning(False)
 
 
 def index_landmarks(track_id: str, path: str, mtime: float):
@@ -574,9 +584,20 @@ def match_fingerprint(clip: np.ndarray, offsets: int = 512) -> tuple[str | None,
 # --- API ---------------------------------------------------------------------------------------------------------
 
 
+REQUEST_THREADS = 100
+
+
+def widen_thread_pool():
+    """Party and TV long-polls wait up to 30 seconds and karaoke audio streams for minutes, each in one of the
+    threads plain request handlers share (40 by default); with this many, they can't hold up every other request."""
+    import anyio.to_thread
+    anyio.to_thread.current_default_thread_limiter().total_tokens = REQUEST_THREADS
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global DB, LOUDNESS, LANDMARKS
+    widen_thread_pool()
     os.makedirs(DATA_DIR, exist_ok=True)
     DB = db()
     LANDMARKS = landmarks.LandmarkIndex(landmarks.index_path(DATA_DIR))
@@ -878,32 +899,53 @@ def library_health() -> dict:
             )
         ]
     duplicates = INDEX.duplicates() if ADVANCED_ANALYSIS else []
-    tags = []
-    try:
-        for item in library_items() if JELLYFIN_URL else []:
-            missing = [
-                name
-                for name, present in (
-                    ("artist", item.get("Artists") or item.get("AlbumArtist")),
-                    ("album", item.get("Album")),
-                    ("year", item.get("ProductionYear")),
-                    ("genre", item.get("Genres")),
-                    ("track number", item.get("IndexNumber")),
-                )
-                if not present
-            ]
-            if missing:
-                tags.append({"id": item["Id"].replace("-", ""), "missing": missing})
-    except Exception:  # noqa: BLE001 - the rest of the report is still useful
-        log.exception("Couldn't read the library's tags")
     return {
         "broken": [{"id": track_id, "reason": reason} for track_id, reason in broken.items()],
         "cutOff": cut,
         "silentEndings": silent_tails,
         "duplicates": duplicates,
-        "missingTags": tags,
+        "missingTags": missing_tags(),
         "advancedAnalysis": ADVANCED_ANALYSIS,
     }
+
+
+# Listing the whole library takes Jellyfin a while; a check-up opened again soon after reuses the last one's tags.
+TAG_SECONDS = 300
+_tags = (float("-inf"), [])
+_tags_lock = threading.Lock()
+
+
+def missing_tags() -> list[dict]:
+    global _tags
+    # Held while Jellyfin lists the library, so check-ups opened together share one listing.
+    with _tags_lock:
+        if time.monotonic() - _tags[0] >= TAG_SECONDS:
+            try:
+                _tags = (time.monotonic(), library_tags())
+            except Exception:  # noqa: BLE001 - the rest of the report is still useful
+                log.exception("Couldn't read the library's tags")
+                return []
+        return list(_tags[1])
+
+
+def library_tags() -> list[dict]:
+    """Songs missing any of the tags the check-up looks for."""
+    tags = []
+    for item in library_items() if JELLYFIN_URL else []:
+        missing = [
+            name
+            for name, present in (
+                ("artist", item.get("Artists") or item.get("AlbumArtist")),
+                ("album", item.get("Album")),
+                ("year", item.get("ProductionYear")),
+                ("genre", item.get("Genres")),
+                ("track number", item.get("IndexNumber")),
+            )
+            if not present
+        ]
+        if missing:
+            tags.append({"id": item["Id"].replace("-", ""), "missing": missing})
+    return tags
 
 
 @app.post("/identify", dependencies=[Depends(authorize)])

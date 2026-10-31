@@ -215,9 +215,11 @@ class ApplicationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder, \
                 patch.multiple(app, DATA_DIR=folder, ADVANCED_ANALYSIS=True, HUB=Mock(), RUNTIME=Mock(), INDEX=Mock()), \
                 patch('app.threading.Thread'), patch('app.LoudnessIndex'), \
-                patch.object(builtins, '__import__', side_effect=guarded):
+                patch.object(builtins, '__import__', side_effect=guarded), \
+                patch.object(app, 'widen_thread_pool') as widen:
             asyncio.run(startup())
             app.DB.close()
+        widen.assert_called_once()
 
     def test_real_lifespan_exposes_authorized_runtime_status_without_changing_existing_audio_routes(self):
         from fastapi.testclient import TestClient
@@ -417,7 +419,9 @@ class HealthCacheTests(unittest.TestCase):
             database.executemany('INSERT INTO tracks(id,path,mtime,embedding,fingerprint) VALUES(?,?,?,?,?)',
                 [(value, value, 1, embedding, fingerprint) for value in ('a', 'b')])
             database.commit()
-            with patch.multiple(app, DB=database, INDEX=index, LOUDNESS=loudness, ADVANCED_ANALYSIS=True, JELLYFIN_URL='test'), \
+            # Tags are listed afresh each time here; their own test has them kept for a while.
+            with patch.multiple(app, DB=database, INDEX=index, LOUDNESS=loudness, ADVANCED_ANALYSIS=True, JELLYFIN_URL='test',
+                                TAG_SECONDS=0), \
                     patch.object(app, 'library_items', return_value=[]) as items, \
                     patch('structure.same_recording', wraps=app.structure.same_recording) as compare:
                 index.reload()
@@ -451,6 +455,70 @@ class HealthCacheTests(unittest.TestCase):
                 database.commit()
                 index.reload()
                 self.assertEqual(app.health()['duplicates'], [])
+
+
+    def test_library_tags_are_listed_once_in_five_minutes(self):
+        import app
+        clock = Mock()
+        clock.monotonic.return_value = 1000
+        with patch.multiple(app, JELLYFIN_URL='test', time=clock, _tags=(float('-inf'), [])), \
+                patch.object(app, 'library_items', return_value=[{'Id': 'a-b'}]) as items:
+            self.assertEqual(app.missing_tags()[0]['id'], 'ab')
+            clock.monotonic.return_value = 1299
+            items.return_value = []
+            self.assertEqual(len(app.missing_tags()), 1)
+            self.assertEqual(items.call_count, 1)
+            clock.monotonic.return_value = 1301
+            self.assertEqual(app.missing_tags(), [])
+            self.assertEqual(items.call_count, 2)
+            # A listing that fails isn't kept.
+            items.side_effect = OSError()
+            clock.monotonic.return_value = 2000
+            self.assertEqual(app.missing_tags(), [])
+            items.side_effect, items.return_value = None, [{'Id': 'c'}]
+            self.assertEqual(len(app.missing_tags()), 1)
+
+    def test_reloading_keeps_unchanged_fingerprints_already_in_memory(self):
+        import app
+        import numpy as np
+        with tempfile.TemporaryDirectory() as folder, patch.object(app, 'DATA_DIR', folder):
+            database = app.db()
+            self.addCleanup(database.close)
+            embedding = np.array([1, 0], dtype=np.float32).tobytes()
+            database.executemany('INSERT INTO tracks(id,path,mtime,embedding,fingerprint) VALUES(?,?,?,?,?)',
+                [(value, value, 1, embedding, np.full(40, n, dtype=np.uint32).tobytes()) for n, value in enumerate('abc')])
+            database.commit()
+            index = app.Index()
+            with patch.object(app, 'DB', database):
+                index.reload()
+                before = dict(index.fingerprints)
+                database.execute("UPDATE tracks SET fingerprint=? WHERE id='b'", (np.full(40, 9, dtype=np.uint32).tobytes(),))
+                database.commit()
+                index.reload()
+            after = dict(index.fingerprints)
+            self.assertIs(after['a'], before['a'])
+            self.assertIs(after['c'], before['c'])
+            self.assertEqual(after['b'].tolist(), [9] * 40)
+            self.assertEqual(index.ids, ['a', 'b', 'c'])
+            self.assertEqual(index.embeddings.shape, (3, 2))
+
+    def test_path_map_matches_whole_folder_names_only(self):
+        import app
+        with patch.object(app, 'PATH_MAP', [('/media/music', '/music'), ('/media/music2/', '/other/')]):
+            self.assertEqual(app.map_path('/media/music/a.flac'), '/music/a.flac')
+            self.assertEqual(app.map_path('/media/music2/a.flac'), '/other/a.flac')
+            self.assertEqual(app.map_path('/media/musicals/a.flac'), '/media/musicals/a.flac')
+        with patch.object(app, 'PATH_MAP', [('/media/music', '/music')]):
+            self.assertEqual(app.map_path('/media/music2/a.flac'), '/media/music2/a.flac')
+
+    def test_request_threads_are_widened_for_long_polls_and_streams(self):
+        import anyio
+        import anyio.to_thread
+        import app
+        async def widened():
+            app.widen_thread_pool()
+            return anyio.to_thread.current_default_thread_limiter().total_tokens
+        self.assertEqual(anyio.run(widened), 100)
 
 
 class LibrarySearchTests(unittest.TestCase):

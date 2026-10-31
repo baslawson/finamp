@@ -72,10 +72,17 @@ class RollingReserveService {
   static Future<void> initialize() => _initializing ??= _initialize();
   static Future<void> loadPreferences() => _loadingPreferences ??= (() async {
     final prefs = SharedPreferencesAsync();
-    enabled = await prefs.getBool('queueReserveEnabled') ?? false;
-    includeDj = await prefs.getBool('queueReserveDj') ?? false;
-    wifiOnly = await prefs.getBool('queueReserveWifi') ?? true;
-    count = (await prefs.getInt('queueReserveCount') ?? 3).clamp(1, 3);
+    // Read together, as the player waits for these at startup.
+    final (on, voices, wifi, songs) = await (
+      prefs.getBool('queueReserveEnabled'),
+      prefs.getBool('queueReserveDj'),
+      prefs.getBool('queueReserveWifi'),
+      prefs.getInt('queueReserveCount'),
+    ).wait;
+    enabled = on ?? false;
+    includeDj = voices ?? false;
+    wifiOnly = wifi ?? true;
+    count = (songs ?? 3).clamp(1, 3);
   })();
   static Future<void> _initialize() async {
     if (_started) return;
