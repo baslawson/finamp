@@ -91,6 +91,10 @@ class NetworkStatus {
     }
   }
 
+  /// How a wait between tries passes.
+  @visibleForTesting
+  static Future<void> Function(Duration) pauseFor = Future<void>.delayed;
+
   /// Runs [attempt], and again while it fails for lack of a connection, for [patience] at most. Android can report a
   /// network while still keeping Finamp off it, so a reported network doesn't end the tries. Waits start at
   /// [firstPause] and double, and no try starts after [patience]. Returns null if [stop] says to give up, also when a
@@ -115,10 +119,13 @@ class NetworkStatus {
         await waitForNetwork(left());
         if (stopped()) return null;
         if (left() <= Duration.zero) rethrow;
-        await Future<void>.delayed(pause < left() ? pause : left());
+        // A wait cut short by the patience is the last one: its timer can fire a touch early, which mustn't mean a new try.
+        final remaining = left();
+        final last = pause >= remaining;
+        await pauseFor(last ? remaining : pause);
         pause *= 2;
         if (stopped()) return null;
-        if (left() <= Duration.zero) rethrow;
+        if (last || left() <= Duration.zero) rethrow;
       }
     }
   }
