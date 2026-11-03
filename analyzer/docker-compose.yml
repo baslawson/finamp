@@ -1,0 +1,59 @@
+# Run next to Jellyfin: `docker compose up -d`, then enter http://<server>:8787 and the token in
+# Finamp+ under Settings > Finamp+ analyzer.
+x-logging: &logging
+  # Docker keeps container logs forever by default; keep the last few MB.
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+services:
+  finamp-analyzer:
+    build: .
+    container_name: finamp-analyzer
+    restart: unless-stopped
+    cpu_shares: 256
+    # Time for a running measurement, broadcast or backup to finish cleanly on `docker compose down`.
+    stop_grace_period: 30s
+    logging: *logging
+    ports:
+      - "8787:8787"
+    environment: &analyzer-environment
+      JELLYFIN_URL: http://jellyfin:8096 # or http://<server-ip>:8096
+      JELLYFIN_API_KEY: change-me # Jellyfin Dashboard > API Keys
+      # Any long random secret, for example the output of `openssl rand -hex 24`. The app sends it with every
+      # request; the analyzer refuses every request while this is still the example value.
+      ANALYZER_TOKEN: change-me-too
+      KARAOKE_URL: http://finamp-karaoke:8788
+      JELLYFIN_BACKUP_DIR: /jellyfin-backups
+      # Optional: remove only native ZIPs created for verified hub bundles.
+      HUB_REMOVE_NATIVE_BACKUP: "true"
+      # If Jellyfin sees your music under a different path than /music, map it here:
+      # PATH_MAP: /media/music=/music
+      # Optional: run as this user and group instead of root, for example the ones that own your music files.
+      # PUID: "1000"
+      # PGID: "1000"
+      # Behind a reverse proxy: the address of the proxy, so TV pairing limits apply per device, and the public
+      # address, when the proxy doesn't send X-Forwarded-Host.
+      # FORWARDED_ALLOW_IPS: 172.18.0.1
+      # PUBLIC_URL: https://music.example.com
+    volumes:
+      - /path/to/your/music:/music:ro
+      - ./data:/data
+      # Jellyfin 12's dedicated backup folder, not the entire Jellyfin config.
+      - /path/to/jellyfin/config/data/data/backups:/jellyfin-backups:rw
+  finamp-karaoke:
+    build:
+      context: .
+      dockerfile: Dockerfile.karaoke
+    container_name: finamp-karaoke
+    restart: unless-stopped
+    cpus: 1.5
+    cpu_shares: 128
+    mem_limit: 3g
+    memswap_limit: 3g
+    stop_grace_period: 30s
+    logging: *logging
+    environment: *analyzer-environment
+    volumes:
+      - /path/to/your/music:/music:ro
+      - ./data:/data
