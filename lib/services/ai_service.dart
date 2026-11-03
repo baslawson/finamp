@@ -13,6 +13,7 @@ import 'ai_provider_health.dart';
 import 'ai_usage.dart';
 import 'network_status.dart';
 import 'operation_deadline.dart';
+import 'web_request_log.dart';
 
 /// The AI services the AI DJ can use. Each needs its own API key.
 enum AiProvider {
@@ -879,20 +880,24 @@ class AiService {
         unawaited(cancelled.then((_) => client.close()));
         final http.Response response;
         try {
-          response = await client
-              .post(
-                Uri.parse("https://api.openai.com/v1/audio/speech"),
-                headers: {"Content-Type": "application/json", "Authorization": "Bearer $key"},
-                body: jsonEncode({
-                  "model": model,
-                  "voice": voice.openai,
-                  "input": text,
-                  if (model != "tts-1") "instructions": style,
-                  // Raw PCM (24 kHz, 16-bit mono) rather than MP3, so the noise after the voice can be cut off.
-                  "response_format": "pcm",
-                }),
-              )
-              .timeout(deadline.cap(const Duration(seconds: 30)));
+          final url = Uri.parse("https://api.openai.com/v1/audio/speech");
+          final encoded = jsonEncode({
+            "model": model,
+            "voice": voice.openai,
+            "input": text,
+            if (model != "tts-1") "instructions": style,
+            // Raw PCM (24 kHz, 16-bit mono) rather than MP3, so the noise after the voice can be cut off.
+            "response_format": "pcm",
+          });
+          response = await loggedWebRequest(
+            _logger,
+            "POST",
+            url,
+            () => client
+                .post(url, headers: {"Content-Type": "application/json", "Authorization": "Bearer $key"}, body: encoded)
+                .timeout(deadline.cap(const Duration(seconds: 30))),
+            sent: utf8.encode(encoded).length,
+          );
         } finally {
           client.close();
         }
@@ -1081,9 +1086,13 @@ class AiService {
     final client = http.Client();
     unawaited(cancelled.then((_) => client.close()));
     try {
-      final response = await client
-          .get(Uri.parse("$_geminiBaseUrl/models?pageSize=200"), headers: {"x-goog-api-key": key})
-          .timeout(deadline.cap(const Duration(seconds: 15)));
+      final url = Uri.parse("$_geminiBaseUrl/models?pageSize=200");
+      final response = await loggedWebRequest(
+        _logger,
+        "GET",
+        url,
+        () => client.get(url, headers: {"x-goog-api-key": key}).timeout(deadline.cap(const Duration(seconds: 15))),
+      );
       if (response.statusCode == 401 || response.statusCode == 403) {
         throw AiException(_describeError(AiProvider.gemini, response), statusCode: response.statusCode);
       }
@@ -1538,9 +1547,15 @@ class AiService {
     final client = http.Client();
     if (cancelled != null) unawaited(cancelled.then((_) => client.close()));
     try {
-      response = await client
-          .post(url, headers: {"Content-Type": "application/json", ...headers}, body: jsonEncode(body))
-          .timeout(timeout);
+      final encoded = jsonEncode(body);
+      response = await loggedWebRequest(
+        _logger,
+        "POST",
+        url,
+        () =>
+            client.post(url, headers: {"Content-Type": "application/json", ...headers}, body: encoded).timeout(timeout),
+        sent: utf8.encode(encoded).length,
+      );
     } on TimeoutException {
       throw AiException('${provider.displayName} request timed out', timedOut: true);
     } catch (e) {
@@ -1581,7 +1596,12 @@ class AiService {
     final requestTimeout = _timeLeft(deadline, maximum: timeout);
     final client = http.Client();
     try {
-      final response = await client.get(url, headers: headers).timeout(requestTimeout);
+      final response = await loggedWebRequest(
+        _logger,
+        "GET",
+        url,
+        () => client.get(url, headers: headers).timeout(requestTimeout),
+      );
       if (response.statusCode == 401 || response.statusCode == 403) {
         throw AiException(_describeError(provider, response), statusCode: response.statusCode);
       }

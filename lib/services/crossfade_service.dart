@@ -409,6 +409,11 @@ class CrossfadeService {
               canCoverNativeTail(untilBoundary: duration - window.start, incomingDuration: nextPlayer.duration)
           ? null
           : false;
+      _logger.fine(
+        "Crossfade plan for $_nextId at ${position.inMilliseconds} ms: window ${window.start.inMilliseconds}"
+        "-${window.end.inMilliseconds} ms, gain ratio ${_gainRatio.toStringAsFixed(3)}, "
+        "${_mixed == null ? "trying the main output" : "two outputs"}",
+      );
       if (_mixed == null) {
         _priming = true;
         _primeStarted = DateTime.now();
@@ -429,6 +434,7 @@ class CrossfadeService {
         'endUs': window.end.inMicroseconds,
         'in': _gainRatio,
       });
+      _logger.fine("Crossfade schedule answered $result at ${position.inMilliseconds} ms");
       if (result == 1) {
         _mixed = true;
         _scheduledWindow = window;
@@ -456,6 +462,11 @@ class CrossfadeService {
       _logger.info(
         "Crossfading into $_nextId from ${window.start.inMilliseconds} to ${window.end.inMilliseconds} ms "
         "(song ${duration.inMilliseconds} ms${window.timed ? ", timed by its analysis" : ""})",
+      );
+      // Mixed, the main output starts the fade by itself on its own timing, so this only says when the app noticed.
+      _logger.fine(
+        "${(_mixed ?? false) ? "Crossfade noticed by the app" : "Crossfade started"} "
+        "${(position - window.start).inMilliseconds} ms after its window opened",
       );
     }
     if (_fading) {
@@ -775,6 +786,7 @@ class CrossfadeService {
     if (_mixed ?? false) {
       // Mixed: the main player continues by itself at the right sample; wait for it to say so.
       int? status;
+      final waited = Stopwatch()..start();
       // Up to 2 min: the catch-up always gets there, but on a slow stream with a long crossfade it can take a while,
       // and the song keeps playing meanwhile. This only guards against a stuck player.
       for (var attempt = 0; attempt < 2400; attempt++) {
@@ -784,6 +796,7 @@ class CrossfadeService {
         if (!_stillOn(id)) return _giveUp("the main player moved on to another song");
         await Future<void>.delayed(const Duration(milliseconds: 50));
       }
+      _logger.fine("Crossfade hand-over answered $status after ${waited.elapsedMilliseconds} ms");
       if (status == _done) {
         _logger.info("Crossfade hand-over done in the main output");
         await _cancel(restoreVolume: false);
@@ -869,6 +882,7 @@ class CrossfadeService {
         }
         // At most half again as fast or half as slow; small gaps close over a second.
         final span = max(1000, drift.inMilliseconds.abs() * 2);
+        _logger.fine("Crossfade hand-over closing the drift over $span ms");
         await player.setSpeed(baseSpeed * (1 + drift.inMilliseconds / span));
         await Future<void>.delayed(Duration(milliseconds: span));
         if (!live()) return;

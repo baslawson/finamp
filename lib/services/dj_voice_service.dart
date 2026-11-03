@@ -774,6 +774,7 @@ class DjVoiceService {
       _readyVocals = vocals;
       _readyFile = file;
       _readyLength = length;
+      _logger.fine("DJ line recorded: $length long, vocals of the next song at $vocals");
       if (Platform.isAndroid && !_talking) {
         unawaited(
           _loadClip(file.path).catchError((Object error) {
@@ -816,6 +817,7 @@ class DjVoiceService {
     if (before <= Duration.zero || remaining > before + _voiceLead) return;
     // Right at the end already: let the next song start with it.
     if (remaining < _voiceLead + const Duration(milliseconds: 500)) return;
+    _logger.fine("DJ was due ${before.inMilliseconds} ms before the song ends");
     _logger.info(
       "DJ starts ${remaining.inMilliseconds} ms before the song ends (line ${length.inMilliseconds} ms"
       "${_readyVocals == null ? '' : ', vocals at ${_readyVocals!.inMilliseconds} ms'}"
@@ -1133,6 +1135,9 @@ class DjVoiceService {
           return;
         }
       }
+      _logger.fine(
+        "DJ wait ended at ${player.playbackPosition.inMilliseconds} ms, wanted ${startAt.inMilliseconds} ms",
+      );
     }
     _speechStarted();
     _cadence.announced();
@@ -1153,6 +1158,10 @@ class DjVoiceService {
         speak: () async {
           if (stillWanted()) {
             voiceStarted = true;
+            _logger.fine(
+              "DJ voice comes in at ${player.playbackPosition.inMilliseconds} ms of the song, "
+              "${DateTime.now().difference(started).inMilliseconds} ms after it was asked for",
+            );
             final text = _recordedLines.remove(file.path);
             if (text != null) _replay.remember(DjAudioClip(file, text));
             await _playClip(
@@ -1197,9 +1206,11 @@ class DjVoiceService {
     final result = _voiceLoadTail.then((_) async {
       await _stoppingVoice?.timeout(const Duration(seconds: 4));
       if (revision != _voiceLoadRevision) return null;
+      final loading = Stopwatch()..start();
       await _voicePlayer.setVolume(0).timeout(const Duration(seconds: 3));
       final length = await _voicePlayer.setFilePath(path).timeout(const Duration(seconds: 8));
       if (revision != _voiceLoadRevision) return null;
+      _logger.fine("DJ voice loaded in ${loading.elapsedMilliseconds} ms");
       _loadedVoicePath = path;
       _logger.info('DJ voice player ready before music ducking');
       return length;
@@ -1319,11 +1330,17 @@ class DjVoiceService {
     if (Platform.isAndroid) {
       try {
         final lead = await player.rampVoiceVolume(to, length).timeout(const Duration(seconds: 3));
-        if (lead != null) return (done: Future<void>.delayed(length + lead), lead: lead);
+        if (lead != null) {
+          _logger.fine(
+            "Music level $from to $to over ${length.inMilliseconds} ms in the main output, ${lead.inMilliseconds} ms ahead",
+          );
+          return (done: Future<void>.delayed(length + lead), lead: lead);
+        }
       } catch (error) {
         _logger.fine('Native music ducking unavailable: ${error.runtimeType}');
       }
     }
+    _logger.fine("Music level $from to $to over ${length.inMilliseconds} ms in steps from the app");
     return (done: _flutterRamp(from, to, length), lead: Duration.zero);
   }
 

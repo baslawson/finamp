@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:finamp/models/jellyfin_models.dart';
+import 'package:finamp/services/web_request_log.dart';
 import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
@@ -103,9 +104,13 @@ class LrclibService {
   }
 
   static Future<dynamic> _get(String path, Map<String, String> query, {int retries = 0}) async {
-    final response = await http
-        .get(Uri.https("lrclib.net", path, query), headers: _headers)
-        .timeout(const Duration(seconds: 8));
+    final url = Uri.https("lrclib.net", path, query);
+    final response = await loggedWebRequest(
+      _logger,
+      "GET",
+      url,
+      () => http.get(url, headers: _headers).timeout(const Duration(seconds: 8)),
+    );
     if (response.statusCode == 404) return null;
     if (_busy.contains(response.statusCode)) {
       if (retries >= busyRetries.length) throw _LrclibBusy(response.statusCode);
