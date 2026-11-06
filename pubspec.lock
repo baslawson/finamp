@@ -735,7 +735,7 @@ packages:
       path: "."
       ref: "2d09182f60fe95529446ee50cc54340827895af9"
       resolved-ref: "2d09182f60fe95529446ee50cc54340827895af9"
-      url: "https://github.com/obiwantoby/flutter_to_airplay.git"
+      url: "https://github.com/MrJai/flutter_to_airplay.git"
     source: git
     version: "2.1.0"
   flutter_user_certificates_android:
