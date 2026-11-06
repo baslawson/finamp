@@ -194,6 +194,11 @@ class Store:
                     warnings INTEGER NOT NULL, checked REAL NOT NULL);
                 CREATE TABLE IF NOT EXISTS backups(id TEXT PRIMARY KEY, name TEXT NOT NULL, bytes INTEGER NOT NULL,
                     verified REAL, created REAL NOT NULL, reason TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS links(id TEXT PRIMARY KEY, owner TEXT NOT NULL, song TEXT NOT NULL,
+                    part TEXT NOT NULL, revision TEXT NOT NULL, guide INTEGER NOT NULL, format TEXT NOT NULL,
+                    name TEXT NOT NULL, created REAL NOT NULL, expires REAL NOT NULL, downloads INTEGER NOT NULL DEFAULT 0,
+                    tags TEXT NOT NULL DEFAULT '');
+                CREATE INDEX IF NOT EXISTS links_owner ON links(owner,expires);
             ''')
             db.execute("UPDATE jobs SET state='queued',message='Resuming after server restart' WHERE state='processing'")
         os.chmod(self.path, 0o600)

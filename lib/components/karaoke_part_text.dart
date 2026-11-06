@@ -20,4 +20,8 @@ extension KaraokePartText on KaraokePart {
   /// The guide brought back is drums whenever the drums are taken out.
   String guide(BuildContext context) =>
       this == KaraokePart.vocals ? context.l10n.karaokeGuideVocals : context.l10n.karaokeGuideDrums;
+
+  /// How the download sheet names one mix of [song]: "Song · Drumless · Guide drums: 25%".
+  String mixTitle(BuildContext context, String? song, int level) =>
+      [song ?? context.l10n.karaoke, label(context), if (level > 0) '${guide(context)}: $level%'].nonNulls.join(' · ');
 }

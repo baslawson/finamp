@@ -50,6 +50,7 @@ class Jobs:
                 self.hub.reports.prune()
                 if time.monotonic() - pruned > 3600:
                     self.hub.store.prune()
+                    self.hub.exports.prune()
                     pruned = time.monotonic()
                 self.schedule()
                 self.run_one()
@@ -78,7 +79,7 @@ class Jobs:
         blocked = {}
         store = self.hub.store
         with store.lock, store.connect() as db:
-            pending = db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY CASE kind WHEN 'media' THEN 0 WHEN 'announcement' THEN 1 WHEN 'backup' THEN 2 ELSE 3 END,created LIMIT 100").fetchall()
+            pending = db.execute("SELECT * FROM jobs WHERE state='queued' ORDER BY CASE kind WHEN 'media' THEN 0 WHEN 'export' THEN 0 WHEN 'announcement' THEN 1 WHEN 'backup' THEN 2 ELSE 3 END,created LIMIT 100").fetchall()
             for candidate in pending:
                 kind = candidate['kind']
                 if kind == 'health' and busy:
@@ -88,7 +89,7 @@ class Jobs:
                     if datetime.now(ZoneInfo(settings['timezone'])).hour >= settings['nightlyEnd']:
                         db.execute("UPDATE jobs SET state='skipped',message='Quiet hours ended; next run is tomorrow' WHERE id=?", (candidate['id'],))
                         continue
-                if runtime and kind in ('health', 'media', 'announcement', 'backup', 'verify'):
+                if runtime and kind in ('health', 'media', 'export', 'announcement', 'backup', 'verify'):
                     reason = blocked.get(kind)
                     if reason is None:
                         lease, reason = runtime.try_acquire(kind)
@@ -109,7 +110,8 @@ class Jobs:
         try:
             result = {'health': self.health, 'media': self.media, 'nightly': self.nightly,
                 'cleanup': self.cleanup, 'backup': self.backup, 'verify': self.verify_job,
-                'announcement': self.announcement, 'lyrics': self.lyrics}[row['kind']](args)
+                'announcement': self.announcement, 'lyrics': self.lyrics,
+                'export': self.hub.exports.convert}[row['kind']](args)
             store.finish(row['id'], 'ready', result or 'Completed')
         except WorkDeferred as error:
             with store.lock, store.connect() as db:
@@ -343,6 +345,8 @@ class Jobs:
                 protected.update(state.get('queue', []))
                 if state.get('song'):
                     protected.add(state['song']['id'])
+        # A mix a download link still offers stays until the link ends.
+        linked = self.hub.exports.linked()
         root = self.hub.data / 'karaoke'
         database = root / 'jobs.db'
         if not database.is_file():
@@ -365,6 +369,8 @@ class Jobs:
             # The TV's browser audio made from these mixes is removed with them, so it counts towards their size.
             size += sum(path.stat().st_size for path in (self.hub.store.root / 'media').glob(f'{version}-*.mp3')
                         if path.is_file() and not path.is_symlink())
+            # So do the files converted from them for download.
+            size += self.hub.exports.size_of(version)
             if version not in counted:
                 total += size
                 counted.add(version)
@@ -376,7 +382,7 @@ class Jobs:
             candidates.append((used, value, version, size, kind))
         removed = 0
         for used, value, version, size, kind in sorted(candidates):
-            if value in protected:
+            if value in protected or version in linked:
                 continue
             expired = time.time() - used > settings['cacheDays'] * 86400
             over_budget = total > settings['cacheGB'] * 1024**3
@@ -394,6 +400,7 @@ class Jobs:
                 total -= size
                 for media in (self.hub.store.root / 'media').glob(f'{version}-*.mp3'):
                     media.unlink(missing_ok=True)
+                self.hub.exports.remove_for(version)
             removed += 1
         return f'Removed {removed} unused server mixes'
 

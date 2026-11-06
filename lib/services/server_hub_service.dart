@@ -49,6 +49,27 @@ class ServerHubService {
     if (scope != RadioPreferencesStore.scope) throw const ServerHubException('The active account changed.');
   }
 
+  static const _late = 'The server hub did not answer in time.';
+
+  /// Waits (within [timeout]) for a turn to send a request to [origin].
+  static Future<_Turns> _turn(String origin, Duration timeout) async {
+    final turns = _turns.putIfAbsent(origin, _Turns.new);
+    if (turns.underWay < mostAtOnce) {
+      turns.underWay++;
+      return turns;
+    }
+    final turn = Completer<void>();
+    turns.waiting.add(turn);
+    try {
+      await turn.future.timeout(timeout);
+    } on TimeoutException {
+      // Given the turn just as time ran out: passed on, unused.
+      if (!turns.waiting.remove(turn)) turns.done();
+      throw TimeoutException(_late, timeout);
+    }
+    return turns;
+  }
+
   Future<dynamic> request(
     String method,
     String path, {
@@ -56,6 +77,7 @@ class ServerHubService {
     String? program,
     String contentType = 'audio/wav',
     Duration timeout = const Duration(seconds: 15),
+    bool serverMessages = false,
   }) async {
     checkAccount();
     // Timed out, the request itself is stopped, not only the wait for it: the client's other connections stay.
@@ -73,22 +95,8 @@ class ServerHubService {
       request.headers['Content-Type'] = 'application/json';
       request.body = jsonEncode(body);
     }
-    const late = 'The server hub did not answer in time.';
     final waited = Stopwatch()..start();
-    final turns = _turns.putIfAbsent(request.url.origin, _Turns.new);
-    if (turns.underWay < mostAtOnce) {
-      turns.underWay++;
-    } else {
-      final turn = Completer<void>();
-      turns.waiting.add(turn);
-      try {
-        await turn.future.timeout(timeout);
-      } on TimeoutException {
-        // Given the turn just as time ran out: passed on, unused.
-        if (!turns.waiting.remove(turn)) turns.done();
-        throw TimeoutException(late, timeout);
-      }
-    }
+    final turns = await _turn(request.url.origin, timeout);
     final answer = client.send(request).then(http.Response.fromStream);
     unawaited(answer.then((_) {}, onError: (Object _) {}).whenComplete(turns.done));
     // The wait ends on time whatever the request's doing, even still connecting (which the abort only reaches once
@@ -99,14 +107,16 @@ class ServerHubService {
         timeout - waited.elapsed,
         onTimeout: () {
           abort.complete();
-          throw TimeoutException(late, timeout);
+          throw TimeoutException(_late, timeout);
         },
       );
     } on http.RequestAbortedException {
-      throw TimeoutException(late, timeout);
+      throw TimeoutException(_late, timeout);
     }
     checkAccount();
     if (response.statusCode >= 300) {
+      final detail = serverMessages ? serverMessage(response) : null;
+      if (detail != null) throw ServerHubException(detail, response.statusCode);
       throw ServerHubException(switch (response.statusCode) {
         401 => 'Sign in again or check the analyzer token.',
         403 => 'Your Jellyfin administrator manages this feature.',
@@ -120,6 +130,91 @@ class ServerHubService {
   }
 
   Uri page(String page, String token) => Uri.parse('$url/hub/$page/').replace(fragment: token);
+
+  /// Starts downloading a file from the hub's [path], for a caller that reads it as it comes (or drains it). The path
+  /// carries its own ticket, so no account details are sent. Like [request], it waits its turn and keeps it until the
+  /// connection has really ended; an answer not started within [timeout], or a body the caller stops reading, stops
+  /// the request itself.
+  Future<http.StreamedResponse> download(String path, {Duration timeout = const Duration(seconds: 30)}) async {
+    checkAccount();
+    final abort = Completer<void>();
+    void stop() {
+      if (!abort.isCompleted) abort.complete();
+    }
+
+    final request = http.AbortableRequest('GET', Uri.parse('$url/hub$path'), abortTrigger: abort.future)
+      ..followRedirects = false;
+    final waited = Stopwatch()..start();
+    final turns = await _turn(request.url.origin, timeout);
+    var released = false;
+    void release() {
+      if (released) return;
+      released = true;
+      turns.done();
+    }
+
+    final sent = client.send(request);
+    final http.StreamedResponse response;
+    try {
+      response = await sent.timeout(
+        timeout - waited.elapsed,
+        onTimeout: () {
+          stop();
+          throw TimeoutException(_late, timeout);
+        },
+      );
+    } catch (error) {
+      // Still connecting, it keeps its turn until it does end; an answer that comes after all is dropped.
+      unawaited(sent.then((late) => late.stream.listen(null).cancel(), onError: (Object _) {}).whenComplete(release));
+      if (error is http.RequestAbortedException) throw TimeoutException(_late, timeout);
+      rethrow;
+    }
+    late StreamSubscription<List<int>> body;
+    final controller = StreamController<List<int>>(sync: true);
+    controller
+      ..onListen = () {
+        body = response.stream.listen(
+          controller.add,
+          onError: (Object error, StackTrace stack) {
+            release();
+            controller.addError(error, stack);
+          },
+          onDone: () {
+            release();
+            controller.close();
+          },
+        );
+      }
+      // The caller writing slower than the connection brings it in holds the connection back.
+      ..onPause = (() => body.pause())
+      ..onResume = (() => body.resume())
+      ..onCancel = () {
+        stop();
+        release();
+        return body.cancel();
+      };
+    return http.StreamedResponse(
+      controller.stream,
+      response.statusCode,
+      contentLength: response.contentLength,
+      request: response.request,
+      headers: response.headers,
+      reasonPhrase: response.reasonPhrase,
+    );
+  }
+
+  /// The hub's own explanation of a refusal (its "detail"), for requests whose refusals say what to do. Not a missing
+  /// route's "Not Found", which means the server is older than the app.
+  @visibleForTesting
+  static String? serverMessage(http.Response response) {
+    try {
+      final detail = (jsonDecode(utf8.decode(response.bodyBytes)) as Map)['detail'];
+      if (detail is! String || detail.isEmpty || detail.length > 300 || detail == 'Not Found') return null;
+      return detail;
+    } catch (_) {
+      return null;
+    }
+  }
 }
 
 /// One server's requests under way, and those waiting their turn.

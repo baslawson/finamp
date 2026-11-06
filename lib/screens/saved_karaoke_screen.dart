@@ -1,4 +1,5 @@
 import 'package:finamp/components/karaoke_delete_dialog.dart';
+import 'package:finamp/components/karaoke_export_sheet.dart';
 import 'package:finamp/components/karaoke_part_text.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/screens/karaoke_screen.dart';
@@ -51,6 +52,17 @@ class _SavedKaraokeScreenState extends State<SavedKaraokeScreen> {
       if (mounted) setState(() => _busy = false);
     }
   }
+
+  /// A saved mix as a file to keep or share, at any guide level the server has (offline, those saved here).
+  Future<void> _export(SavedKaraoke saved) => showKaraokeExportSheet(
+    context,
+    song: saved.item.id.raw,
+    part: saved.job.part,
+    guide: saved.guides.first,
+    savedGuides: saved.guides,
+    title: (guide) => saved.job.part.mixTitle(context, saved.item.name, guide),
+    saved: (guide) => _service.localMix(saved.item.id.raw, saved.job, guide, onlyOffline: true),
+  );
 
   Future<void> _delete(SavedKaraoke saved) async {
     if (_busy) return;
@@ -129,11 +141,16 @@ class _SavedKaraokeScreenState extends State<SavedKaraokeScreen> {
                     onTap: _busy ? null : () => _play(saved, saved.guides.first),
                     trailing: PopupMenuButton<String>(
                       enabled: !_busy,
-                      onSelected: (action) => action == 'delete' ? _delete(saved) : _play(saved, int.parse(action)),
+                      onSelected: (action) => switch (action) {
+                        'delete' => _delete(saved),
+                        'export' => _export(saved),
+                        _ => _play(saved, int.parse(action)),
+                      },
                       itemBuilder: (_) => [
                         for (final guide in saved.guides)
                           PopupMenuItem(value: '$guide', child: Text('${part.guide(context)}: $guide%')),
                         const PopupMenuDivider(),
+                        PopupMenuItem(value: 'export', child: Text(context.l10n.karaokeExport)),
                         PopupMenuItem(value: 'delete', child: Text(context.l10n.karaokeDeletePhone)),
                       ],
                     ),

@@ -19,6 +19,7 @@ from fastapi.responses import FileResponse, RedirectResponse, Response, Streamin
 from starlette.concurrency import run_in_threadpool
 
 from hub_core import Actor, Capabilities, Jellyfin, Store, bounded_text, integer, revision, song_id
+from hub_exports import Exports
 from hub_jobs import Jobs
 from hub_party import Parties
 from hub_radio import Radio
@@ -44,6 +45,7 @@ class Hub:
         self.actor_cache, self.room_checks, self.lyric_cache = {}, {}, {}
         self.pair_attempts = {}
         self.radio, self.jobs = Radio(self), Jobs(self)
+        self.exports = Exports(self)
         self.parties = Parties()
         self.reports = Reports(self.data / 'hub')
 
@@ -971,6 +973,43 @@ def create_app(hub):
             raise HTTPException(404, 'Browser audio is not ready')
         hub.touch_cache(cap['revision'])
         return FileResponse(path, media_type='audio/mpeg')
+
+    def link_base(request):
+        # Links work away from home through the public address; without one, only on the server's own network.
+        public = public_url()
+        if public:
+            return f'{public}/hub'
+        # The hub's own address as this request reached it: its path up to the API, wherever the hub is mounted.
+        path = request.url.path
+        return f'{request.url.scheme}://{request.url.netloc}{path[:path.rfind("/api/karaoke/links")]}'
+
+    @app.post('/api/karaoke/exports')
+    def start_export(body: dict = Body(...), user=Depends(actor)):
+        return hub.exports.request(user, body)
+
+    @app.get('/api/karaoke/exports')
+    def export_status(song: str = '', part: str = 'vocals', guide: int = 0, format: str = '', user=Depends(actor)):
+        return hub.exports.status(user, {'song': song, 'part': part, 'guide': guide, 'format': format})
+
+    @app.get('/api/karaoke/exports/file/{ticket}')
+    def export_file(ticket: str):
+        return hub.exports.file(ticket)
+
+    @app.get('/api/karaoke/links')
+    def karaoke_links(request: Request, user=Depends(actor)):
+        return {'links': hub.exports.links(user, link_base(request)), 'public': public_url() is not None}
+
+    @app.post('/api/karaoke/links')
+    def create_karaoke_link(request: Request, body: dict = Body(...), user=Depends(actor)):
+        return {**hub.exports.create_link(user, body, link_base(request)), 'public': public_url() is not None}
+
+    @app.delete('/api/karaoke/links/{value}')
+    def stop_karaoke_link(value: str, user=Depends(actor)):
+        return hub.exports.stop_link(user, value)
+
+    @app.get('/dl/{token}')
+    def shared_download(token: str, request: Request):
+        return hub.exports.shared(token, request.headers.get('range', ''))
 
     @app.post('/api/reports/{kind}')
     def upload_report(kind: str, body: bytes = Body(..., media_type='application/zip'), user=Depends(actor)):

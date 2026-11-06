@@ -1,6 +1,8 @@
 import 'dart:async';
 import 'dart:math';
 
+import 'package:finamp/components/karaoke_export_sheet.dart';
+import 'package:finamp/components/karaoke_part_text.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/models/jellyfin_models.dart';
 import 'package:finamp/services/current_track_metadata_provider.dart';
@@ -281,6 +283,20 @@ class _KaraokeScreenState extends ConsumerState<KaraokeScreen> with SingleTicker
     }
   }
 
+  /// The mix chosen here as a file to keep or share.
+  Future<void> _exportFile() {
+    final song = _song!, job = _job!, part = _part;
+    final name = GetIt.instance<QueueService>().getCurrentTrack()?.baseItem.name;
+    return showKaraokeExportSheet(
+      context,
+      song: song,
+      part: part,
+      guide: _guide,
+      title: (guide) => part.mixTitle(context, name, guide),
+      saved: (guide) => _service.localMix(song, job, guide, onlyOffline: true),
+    );
+  }
+
   Future<void> _exit() async {
     if (_leaving) return;
     setState(() => _leaving = true);
@@ -507,6 +523,13 @@ class _KaraokeScreenState extends ConsumerState<KaraokeScreen> with SingleTicker
                       : () => _useMix(saveOnly: true),
                   icon: Icon(_saved ? TablerIcons.check : TablerIcons.download),
                   label: Text(_saved ? context.l10n.karaokeSaved : context.l10n.karaokeSaveOffline),
+                ),
+                TextButton.icon(
+                  onPressed: _busy || _song == null || _job?.ready != true || (_offline && !_available.contains(_guide))
+                      ? null
+                      : _exportFile,
+                  icon: const Icon(Icons.audio_file),
+                  label: Text(context.l10n.karaokeExport),
                 ),
               ],
             ],

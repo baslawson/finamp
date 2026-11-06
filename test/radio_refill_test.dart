@@ -386,6 +386,7 @@ class _Hub implements ServerHubService {
     String? program,
     String contentType = 'audio/wav',
     Duration timeout = const Duration(seconds: 15),
+    bool serverMessages = false,
   }) async {
     calls.add('$method $path');
     if (method == 'POST' && path == '/api/parties') {

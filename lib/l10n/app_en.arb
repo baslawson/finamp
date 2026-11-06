@@ -4915,6 +4915,58 @@
         }
     },
     "karaokeSavedLibrary": "Saved karaoke",
+    "karaokeExport": "Download as file",
+    "karaokeExportFlacHint": "Lossless, about 6 MB a minute",
+    "karaokeExportWavHint": "Uncompressed, about 10 MB a minute",
+    "karaokeExportMp3Hint": "320 kbps, about 2.4 MB a minute. Plays almost anywhere.",
+    "karaokeExportSave": "Save to phone",
+    "karaokeExportShare": "Share file",
+    "karaokeExportLink": "Download link",
+    "karaokeExportLinkLength": "Works for {length}",
+    "@karaokeExportLinkLength": {
+        "placeholders": {
+            "length": {
+                "type": "String"
+            }
+        }
+    },
+    "karaokeLinkHour": "1 hour",
+    "karaokeLinkDay": "24 hours",
+    "karaokeLinkWeek": "7 days",
+    "karaokeExportMakeLink": "Make link",
+    "karaokeExportConverting": "Converting on the server…",
+    "karaokeExportDownloading": "Downloading {percent}%",
+    "@karaokeExportDownloading": {
+        "placeholders": {
+            "percent": {
+                "type": "int"
+            }
+        }
+    },
+    "karaokeExportSaved": "Saved {name}",
+    "@karaokeExportSaved": {
+        "placeholders": {
+            "name": {
+                "type": "String"
+            }
+        }
+    },
+    "karaokeExportFailed": "The file could not be made. Try again.",
+    "karaokeExportOffline": "Converting needs your server. Offline, a mix saved on this phone is shared as FLAC.",
+    "karaokeExportTooLarge": "This file is too long to save this way. Use Share file and choose where to keep it, or pick MP3.",
+    "@karaokeExportTooLarge": {"description": "Shown when a converted karaoke file is too big for the phone's save dialog"},
+    "karaokeExportLinkReady": "Anyone with this link can download the file until {time}.",
+    "@karaokeExportLinkReady": {
+        "placeholders": {
+            "time": {
+                "type": "String"
+            }
+        }
+    },
+    "karaokeExportLinkHomeOnly": "It only works on your home network, as the server has no public address.",
+    "karaokeExportCopy": "Copy link",
+    "karaokeExportCopied": "Link copied",
+    "karaokeExportShareLink": "Share link",
     "featureCancel": "Cancel",
     "featureRemove": "Remove",
     "featureRetry": "Retry",

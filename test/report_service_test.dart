@@ -30,6 +30,7 @@ class _Hub implements ServerHubService {
     String? program,
     String contentType = 'audio/wav',
     Duration timeout = const Duration(seconds: 15),
+    bool serverMessages = false,
   }) async {
     sent.add((path: path, body: body, contentType: contentType));
     await hold?.future;
