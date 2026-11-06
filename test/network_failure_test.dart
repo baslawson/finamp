@@ -193,6 +193,31 @@ void main() {
       expect(attempts, 1);
     });
 
+    test("a wait for a network that took the rest of the patience is the last, even if its timer fires early", () async {
+      final realWait = NetworkStatus.networkWait;
+      final realPause = NetworkStatus.pauseFor;
+      addTearDown(() {
+        NetworkStatus.networkWait = realWait;
+        NetworkStatus.pauseFor = realPause;
+      });
+      // Timers round down to whole milliseconds, so a wait can end just before the patience is up. Here all of them do.
+      NetworkStatus.networkWait = (_) async => NetworkWait.stillOffline;
+      NetworkStatus.pauseFor = (_) async {};
+      var attempts = 0;
+      await expectLater(
+        NetworkStatus.retryWhileOffline(
+          () async {
+            if (++attempts > 5) throw StateError("Kept trying");
+            throw const SocketException("Gone");
+          },
+          patience: const Duration(minutes: 1),
+          firstPause: Duration.zero,
+        ),
+        throwsA(isA<SocketException>()),
+      );
+      expect(attempts, 1);
+    });
+
     test("a stop during the last wait for a network isn't reported as a lost connection", () async {
       var stopping = false;
       // The check itself outlasts the patience, so the deadline has certainly passed when the wait ends.
