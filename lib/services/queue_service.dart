@@ -164,6 +164,25 @@ class QueueService {
     }
   }
 
+  /// Whether the queue can be saved with its position right away: only a queue that is being kept (not a restored one
+  /// that hasn't played yet), with a current song, and not while it is being replaced.
+  @visibleForTesting
+  static bool canSaveNow({required SavedQueueState state, required bool hasCurrentTrack, required bool replacing}) =>
+      state == SavedQueueState.saving && hasCurrentTrack && !replacing;
+
+  /// Saves the queue with the current position at once. Swiping the app away pauses it and then stops it half a second
+  /// later, and Android can freeze the app before the ten-second save check runs; the next start then resumed from the
+  /// last periodic save, up to a minute earlier.
+  void saveNow() {
+    if (!canSaveNow(state: _savedQueueState, hasCurrentTrack: _currentTrack != null, replacing: _replacing > 0)) {
+      return;
+    }
+    _saveUpdateImmediate = false;
+    _saveUpdateCycleCount = 0;
+    final info = _saveCurrentQueue(withPosition: true);
+    _queueServiceLogger.finest("Saved queue before stopping $info");
+  }
+
   void _saveTick() {
     // Update once per minute while playing in background, and up to once every ten seconds if
     // pausing/seeking is occurring

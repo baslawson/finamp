@@ -4,6 +4,7 @@ import 'dart:math';
 import 'package:finamp/components/album_image.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/services/current_album_image_provider.dart';
+import 'package:finamp/services/screen_wakelock.dart';
 import 'package:finamp/services/spectrum_reader.dart';
 import 'package:finamp/services/theme_provider.dart';
 import 'package:flutter/material.dart';
@@ -11,7 +12,6 @@ import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
 
 enum VisualizerStyle { bars, ring }
 
@@ -44,7 +44,7 @@ class _VisualizerState extends ConsumerState<_Visualizer> with SingleTickerProvi
   void initState() {
     super.initState();
     unawaited(SpectrumReader.setEnabled(true));
-    unawaited(WakelockPlus.enable());
+    unawaited(keepScreenOn(true));
     unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky));
     _ticker = createTicker((_) => _poll())..start();
     _scheduleHide();
@@ -55,7 +55,7 @@ class _VisualizerState extends ConsumerState<_Visualizer> with SingleTickerProvi
     _ticker.dispose();
     _hideInfo?.cancel();
     unawaited(SpectrumReader.setEnabled(false));
-    unawaited(WakelockPlus.disable());
+    unawaited(keepScreenOn(false));
     unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
     super.dispose();
   }

@@ -1118,6 +1118,12 @@ class MusicPlayerBackgroundTask extends BaseAudioHandler with SeekHandler, Queue
     _requestPause(PauseBy.listener);
     try {
       _audioServiceBackgroundTaskLogger.info("Audio service received stop command");
+      // While the player still holds the listener's position: the app may be frozen soon after a stop.
+      try {
+        GetIt.instance<QueueService>().saveNow();
+      } catch (e) {
+        _audioServiceBackgroundTaskLogger.warning("Couldn't save the queue before stopping: $e");
+      }
 
       if (FinampSettingsHelper.finampSettings.clearQueueOnStopEvent) {
         await GetIt.instance<QueueService>().stopAndClearQueue();

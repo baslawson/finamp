@@ -1,10 +1,12 @@
+import 'dart:async';
+
 import 'package:finamp/components/global_snackbar.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/services/running_service.dart';
+import 'package:finamp/services/screen_wakelock.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_tabler_icons/flutter_tabler_icons.dart';
 import 'package:rxdart/rxdart.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
 
 /// Running mode: music that follows your steps.
 class RunningScreen extends StatefulWidget {
@@ -28,12 +30,12 @@ class _RunningScreenState extends State<RunningScreen> {
     RunningService.sensorAvailable().then((available) {
       if (mounted) setState(() => _sensor = available);
     });
-    WakelockPlus.enable();
+    unawaited(keepScreenOn(true));
   }
 
   @override
   void dispose() {
-    WakelockPlus.disable();
+    unawaited(keepScreenOn(false));
     super.dispose();
   }
 

@@ -1,13 +1,15 @@
+import 'dart:async';
+
 import 'package:battery_plus/battery_plus.dart';
 import 'package:finamp/models/finamp_models.dart';
 import 'package:finamp/screens/lyrics_screen.dart';
 import 'package:finamp/services/finamp_settings_helper.dart';
 import 'package:finamp/services/music_player_background_task.dart';
+import 'package:finamp/services/screen_wakelock.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:get_it/get_it.dart';
 import 'package:logging/logging.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
 
 /// Implements ability to keep screen on according to various conditions
 class KeepScreenOnHelper {
@@ -104,14 +106,14 @@ class KeepScreenOnHelper {
   void _turnOn() {
     if (!_keepingScreenOn) {
       _keepingScreenOn = true;
-      WakelockPlus.enable();
+      unawaited(keepScreenOn(true));
     }
   }
 
   void _turnOff() {
     if (_keepingScreenOn) {
       _keepingScreenOn = false;
-      WakelockPlus.disable();
+      unawaited(keepScreenOn(false));
     }
   }
 }

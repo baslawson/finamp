@@ -246,6 +246,33 @@ void main() {
     );
   });
 
+  test('a stop saves the queue at once only when it is kept, has a song and is not being replaced', () {
+    expect(QueueService.canSaveNow(state: SavedQueueState.saving, hasCurrentTrack: true, replacing: false), isTrue);
+    expect(
+      QueueService.canSaveNow(state: SavedQueueState.pendingSave, hasCurrentTrack: true, replacing: false),
+      isFalse,
+      reason: 'a restored queue that has not played must not overwrite the saved one',
+    );
+    for (final state in [
+      SavedQueueState.preInit,
+      SavedQueueState.init,
+      SavedQueueState.loading,
+      SavedQueueState.failed,
+    ]) {
+      expect(QueueService.canSaveNow(state: state, hasCurrentTrack: true, replacing: false), isFalse, reason: '$state');
+    }
+    expect(
+      QueueService.canSaveNow(state: SavedQueueState.saving, hasCurrentTrack: false, replacing: false),
+      isFalse,
+      reason: 'an empty queue must not replace the saved one',
+    );
+    expect(
+      QueueService.canSaveNow(state: SavedQueueState.saving, hasCurrentTrack: true, replacing: true),
+      isFalse,
+      reason: 'a half-replaced queue must not be saved',
+    );
+  });
+
   test('offline mixes look at downloads only while one is still coming', () {
     const ready = (music: 3, voices: 3, ready: true);
     const downloading = (music: 1, voices: 0, ready: false);
