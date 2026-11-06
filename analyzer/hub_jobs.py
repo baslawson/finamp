@@ -50,8 +50,13 @@ class Jobs:
                 self.hub.reports.prune()
                 if time.monotonic() - pruned > 3600:
                     self.hub.store.prune()
-                    self.hub.exports.prune()
+                    # Asking Jellyfin and the karaoke server about links, it can fail in ways of theirs: tried again
+                    # next hour, without holding up the jobs.
                     pruned = time.monotonic()
+                    try:
+                        self.hub.exports.prune()
+                    except Exception as error:
+                        log.warning('Download link cleanup failed (%s); trying again in an hour', type(error).__name__)
                 self.schedule()
                 self.run_one()
             except Exception as error:

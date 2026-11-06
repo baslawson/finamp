@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
+import 'package:finamp/components/karaoke_links.dart';
 import 'package:finamp/extensions/localizations.dart';
 import 'package:finamp/services/finamp_settings_helper.dart';
 import 'package:finamp/services/karaoke_export.dart';
@@ -81,7 +82,8 @@ class _KaraokeExportSheetState extends State<KaraokeExportSheet> {
   var _length = KaraokeLinkLength.day;
   late int _guide = widget.guide;
   bool _busy = false;
-  String? _status, _error;
+  // What's under way, what went wrong, and what was done. Shown in the sheet: a snack bar would show behind it.
+  String? _status, _error, _notice;
   ({KaraokeLink link, bool public})? _shared;
 
   bool get _offline => widget.offline ?? FinampSettingsHelper.finampSettings.isOffline;
@@ -90,6 +92,19 @@ class _KaraokeExportSheetState extends State<KaraokeExportSheet> {
   void initState() {
     super.initState();
     unawaited(widget.export.clearOld().catchError((Object _) {}));
+    KaraokeExport.linksChanged.addListener(_linksChanged);
+  }
+
+  @override
+  void dispose() {
+    KaraokeExport.linksChanged.removeListener(_linksChanged);
+    super.dispose();
+  }
+
+  /// The link shown here stopped elsewhere (from Your download links): it no longer works, so it can't stay on offer.
+  void _linksChanged() {
+    final shared = _shared;
+    if (shared != null && KaraokeExport.stopped.contains(shared.link.id)) setState(() => _shared = null);
   }
 
   String _hint(KaraokeFileFormat format) => switch (format) {
@@ -109,6 +124,7 @@ class _KaraokeExportSheetState extends State<KaraokeExportSheet> {
     setState(() {
       _busy = true;
       _error = null;
+      _notice = null;
       _shared = null;
     });
     try {
@@ -129,7 +145,8 @@ class _KaraokeExportSheetState extends State<KaraokeExportSheet> {
 
   Future<KaraokeExportFile> _prepare() async {
     setState(() => _status = context.l10n.karaokeExportConverting);
-    return widget.export.prepare(widget.song, widget.part, _guide, _format);
+    // Closing the sheet stops the wait (and the download after it), which nothing would show any more.
+    return widget.export.prepare(widget.song, widget.part, _guide, _format, cancelled: () => !mounted);
   }
 
   /// Where the share popover points on an iPad, which can't show one without it.
@@ -158,6 +175,7 @@ class _KaraokeExportSheetState extends State<KaraokeExportSheet> {
         progress: (fraction) {
           if (mounted) setState(() => _status = context.l10n.karaokeExportDownloading((fraction * 100).floor()));
         },
+        cancelled: () => !mounted,
       );
       name = prepared.name;
     }
@@ -188,10 +206,28 @@ class _KaraokeExportSheetState extends State<KaraokeExportSheet> {
       final path = await FilePicker.saveFile(fileName: name, bytes: await file.readAsBytes());
       if (path == null) return;
     }
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(context.l10n.karaokeExportSaved(name))));
-    }
+    if (mounted) setState(() => _notice = context.l10n.karaokeExportSaved(name));
   });
+
+  /// Stops the link just made: it ends straight away for everyone who has it.
+  Future<void> _stopLink(KaraokeLink link) {
+    final shared = _shared;
+    return _run(() async {
+      try {
+        await widget.export.stop(link.id);
+      } on ServerHubException {
+        // Refused by the server, or not sent at all: the link still works, so it stays in view with its buttons.
+        // Without an answer (timed out, no connection) it may have stopped after all, so it isn't offered again:
+        // Your download links shows it if it's still there.
+        if (mounted) setState(() => _shared = shared);
+        rethrow;
+      } catch (_) {
+        if (!mounted) rethrow;
+        throw ServerHubException(context.l10n.karaokeLinkStopUnsure);
+      }
+      if (mounted) setState(() => _notice = context.l10n.karaokeLinkStopped);
+    });
+  }
 
   Future<void> _link() => _run(() async {
     await _prepare();
@@ -312,6 +348,11 @@ class _KaraokeExportSheetState extends State<KaraokeExportSheet> {
                 padding: const EdgeInsets.only(top: 8),
                 child: Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
               ),
+            if (_notice != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(_notice!, style: TextStyle(color: Theme.of(context).colorScheme.primary)),
+              ),
             if (shared != null) ...[
               const SizedBox(height: 16),
               SelectableText(shared.link.url, maxLines: 3),
@@ -328,10 +369,9 @@ class _KaraokeExportSheetState extends State<KaraokeExportSheet> {
                 children: [
                   TextButton.icon(
                     onPressed: () async {
-                      final messenger = ScaffoldMessenger.of(context);
                       final copied = l10n.karaokeExportCopied;
                       await Clipboard.setData(ClipboardData(text: shared.link.url));
-                      messenger.showSnackBar(SnackBar(content: Text(copied)));
+                      if (mounted) setState(() => _notice = copied);
                     },
                     icon: const Icon(Icons.copy),
                     label: Text(l10n.karaokeExportCopy),
@@ -342,9 +382,23 @@ class _KaraokeExportSheetState extends State<KaraokeExportSheet> {
                     icon: const Icon(Icons.share),
                     label: Text(l10n.karaokeExportShareLink),
                   ),
+                  TextButton.icon(
+                    onPressed: _busy ? null : () => _stopLink(shared.link),
+                    icon: const Icon(Icons.link_off),
+                    label: Text(l10n.karaokeLinkStop),
+                  ),
                 ],
               ),
             ],
+            if (!offline)
+              Align(
+                alignment: AlignmentDirectional.centerStart,
+                child: TextButton.icon(
+                  onPressed: () => showKaraokeLinksSheet(context, export: widget.export),
+                  icon: const Icon(Icons.list),
+                  label: Text(l10n.karaokeLinksYours),
+                ),
+              ),
           ],
         ),
       ),

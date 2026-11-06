@@ -109,14 +109,15 @@ class Hub:
         values.extend(json.loads(row)['song'] for row in recent)
         return list(dict.fromkeys(values))[:512]
 
-    def cached_actor(self, *, token=None, owner=None):
+    def cached_actor(self, *, token=None, owner=None, **kwargs):
+        """[kwargs]: a timeout for Jellyfin when it must be asked, for a caller that must answer in time."""
         key = ('token:' + hashlib.sha256(token.encode()).hexdigest()) if token else 'owner:' + song_id(owner)
         now = time.monotonic()
         with self.lock:
             cached = self.actor_cache.get(key)
             if cached and cached[0] > now:
                 return cached[1]
-        actor = self.jellyfin.actor(token=token, owner=owner)
+        actor = self.jellyfin.actor(token=token, owner=owner, **kwargs)
         with self.lock:
             if len(self.actor_cache) > 256:
                 self.actor_cache.clear()
@@ -145,12 +146,12 @@ class Hub:
         if actor.admin and not self.store.settings()['owner']:
             self.store.save_settings({'owner': actor.id})
 
-    def karaoke(self, method, path, **kwargs):
+    def karaoke(self, method, path, timeout=(5, 30), **kwargs):
         if not self.karaoke_url:
             raise HTTPException(503, 'Server karaoke is not configured')
         try:
             response = self.worker_http.request(method, self.karaoke_url + path,
-                headers={'X-Api-Key': self.token}, timeout=(5, 30), **kwargs)
+                headers={'X-Api-Key': self.token}, timeout=timeout, **kwargs)
         except requests.RequestException:
             raise HTTPException(503, 'The karaoke worker is temporarily unavailable') from None
         with response:
@@ -1009,7 +1010,7 @@ def create_app(hub):
 
     @app.get('/dl/{token}')
     def shared_download(token: str, request: Request):
-        return hub.exports.shared(token, request.headers.get('range', ''))
+        return hub.exports.shared(token, request.headers.get('range', ''), request.headers.get('user-agent', ''))
 
     @app.post('/api/reports/{kind}')
     def upload_report(kind: str, body: bytes = Body(..., media_type='application/zip'), user=Depends(actor)):

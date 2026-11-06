@@ -1,9 +1,9 @@
 import 'dart:async';
+import 'package:finamp/components/karaoke_links.dart';
 import 'package:finamp/models/finamp_models.dart';
 import 'package:finamp/models/jellyfin_models.dart';
 import 'package:finamp/services/dj_voice_service.dart';
 import 'package:finamp/services/jellyfin_api_helper.dart';
-import 'package:finamp/services/karaoke_export.dart';
 import 'package:finamp/services/music_player_background_task.dart';
 import 'package:finamp/services/queue_service.dart';
 import 'package:finamp/services/server_hub_service.dart';
@@ -11,7 +11,6 @@ import 'package:finamp/services/server_sync_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:get_it/get_it.dart';
-import 'package:intl/intl.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import 'package:url_launcher/url_launcher.dart';
 
@@ -28,9 +27,6 @@ class _ServerHubScreenState extends State<ServerHubScreen> {
   // The rooms open on the server, which outlive this screen: leaving it mustn't lose the way to stop a TV.
   List<Map<String, dynamic>> _rooms = [];
   List<dynamic> _historyItems = [];
-  // Karaoke files shared as links, which keep working until they end or are stopped here.
-  List<KaraokeLink> _downloadLinks = [];
-  bool _linksPublic = true;
   bool _loading = true, _busy = false, _enabled = true;
   String? _error;
   @override
@@ -50,18 +46,10 @@ class _ServerHubScreenState extends State<ServerHubScreen> {
         for (final room in await hub.request('GET', '/api/rooms') as List) Map<String, dynamic>.from(room as Map),
       ];
       final enabled = await ServerSyncService.enabled();
-      ({List<KaraokeLink> links, bool public})? shared;
-      try {
-        shared = await KaraokeExport().links(hub: hub);
-      } catch (_) {
-        // A server from before download links has none to list, and the rest of the hub works without them.
-      }
       if (!mounted) return;
       setState(() {
         if (_hub?.scope != hub.scope || !rooms.any((room) => room['id'] == _room?['id'])) _room = null;
         _rooms = rooms;
-        _downloadLinks = shared?.links ?? [];
-        _linksPublic = shared?.public ?? true;
         _hub = hub;
         _status = status;
         _sync = sync;
@@ -354,52 +342,8 @@ class _ServerHubScreenState extends State<ServerHubScreen> {
                       ),
                     ],
                   ],
-                  if (_downloadLinks.isNotEmpty) ...[
-                    const Divider(height: 32),
-                    ListTile(
-                      contentPadding: EdgeInsets.zero,
-                      leading: const Icon(Icons.link),
-                      title: const Text('Download links'),
-                      subtitle: Text(
-                        _linksPublic
-                            ? 'Karaoke files you shared. Anyone with a link can download its file until it ends.'
-                            : 'Karaoke files you shared. They only work on your home network, as the server has no public address.',
-                      ),
-                    ),
-                    for (final link in _downloadLinks)
-                      ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        title: Text(link.name),
-                        subtitle: Text(
-                          'Until ${DateFormat.MMMEd().add_jm().format(link.expires)} · '
-                          '${link.downloads == 1 ? '1 download' : '${link.downloads} downloads'}',
-                        ),
-                        trailing: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            IconButton(
-                              tooltip: 'Copy link',
-                              icon: const Icon(Icons.copy),
-                              onPressed: () async {
-                                final messenger = ScaffoldMessenger.of(context);
-                                await Clipboard.setData(ClipboardData(text: link.url));
-                                messenger.showSnackBar(const SnackBar(content: Text('Link copied')));
-                              },
-                            ),
-                            IconButton(
-                              tooltip: 'Stop link',
-                              icon: const Icon(Icons.link_off),
-                              onPressed: _busy
-                                  ? null
-                                  : () => _run(() async {
-                                      await KaraokeExport().stop(link.id, hub: _hub);
-                                      if (mounted) setState(() => _downloadLinks.remove(link));
-                                    }),
-                            ),
-                          ],
-                        ),
-                      ),
-                  ],
+                  // Karaoke files shared as links, which keep working until they end or are stopped here.
+                  if (_hub != null) KaraokeLinksList(hub: _hub),
                   const Divider(height: 32),
                   SwitchListTile(
                     contentPadding: EdgeInsets.zero,

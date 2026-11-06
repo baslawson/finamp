@@ -17,6 +17,9 @@ import requests
 from fastapi import HTTPException
 from server_http import HttpPool, ResultCache
 
+# Jellyfin's answer, as opposed to any other 404 on the way: this account can't see the song.
+NOT_VISIBLE = 'This song is not available to your account'
+
 
 def song_id(value):
     value = str(value).replace('-', '').lower()
@@ -70,14 +73,15 @@ class Jellyfin:
         with self.request(method, path, **kwargs) as response:
             return response.json() if response.content else None
 
-    def actor(self, token=None, owner=None):
-        user = self.json('GET', '/Users/Me' if token else f'/Users/{song_id(owner)}', token=token)
+    def actor(self, token=None, owner=None, **kwargs):
+        user = self.json('GET', '/Users/Me' if token else f'/Users/{song_id(owner)}', token=token, **kwargs)
         policy = user.get('Policy') or {}
         if policy.get('IsDisabled'):
             raise HTTPException(403, 'This Jellyfin account is disabled')
         return Actor(song_id(user['Id']), user.get('Name', 'Listener'), bool(policy.get('IsAdministrator')))
 
-    def items(self, owner, *, ids=None, search=None, limit=100, start=0, favorites=False, random=False):
+    def items(self, owner, *, ids=None, search=None, limit=100, start=0, favorites=False, random=False, timeout=None):
+        """[timeout]: seconds, or connect and read seconds, for a caller that must have its answer in time."""
         params = {'IncludeItemTypes': 'Audio', 'Recursive': 'true', 'Limit': min(limit, 1000),
             'StartIndex': start, 'Fields': 'Path,Genres,MediaSources,UserData', 'EnableUserData': 'true'}
         if ids is not None:
@@ -91,11 +95,16 @@ class Jellyfin:
         params['SortBy'] = 'Random' if random else 'SortName'
         owner = song_id(owner)
         def load():
-            result = self.json('GET', f'/Users/{owner}/Items', params=params)
-            return [item for item in result.get('Items', []) if item.get('Type') == 'Audio']
+            result = self.json('GET', f'/Users/{owner}/Items', params=params, timeout=timeout or 20)
+            # Something else than Jellyfin's answer (a proxy's page, say) isn't taken for no songs at all.
+            if not isinstance(result, dict) or not isinstance(result.get('Items'), list):
+                raise HTTPException(502, 'Jellyfin could not complete this request')
+            return [item for item in result['Items'] if item.get('Type') == 'Audio']
         # Random pools and favourites must reflect live choices. Large library
-        # pages are deliberately excluded from the small metadata cache.
-        if random or favorites or limit > 200:
+        # pages are deliberately excluded from the small metadata cache. A caller in a hurry asks for itself: waiting
+        # for the same query already under way could take longer, and others waiting on its brief one would be
+        # failed by it.
+        if random or favorites or limit > 200 or timeout is not None:
             return load()
         return self.metadata.get((owner, tuple(sorted(params.items()))), load)
 
@@ -104,10 +113,10 @@ class Jellyfin:
         return sum(1 for session in sessions if session.get('NowPlayingItem')
             and not (session.get('PlayState') or {}).get('IsPaused', True))
 
-    def item(self, owner, value):
-        items = self.items(owner, ids=[value], limit=1)
+    def item(self, owner, value, timeout=None):
+        items = self.items(owner, ids=[value], limit=1, timeout=timeout)
         if not items:
-            raise HTTPException(404, 'This song is not available to your account')
+            raise HTTPException(404, NOT_VISIBLE)
         return items[0]
 
     def path(self, item):

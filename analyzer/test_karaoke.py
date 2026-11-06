@@ -434,8 +434,13 @@ class KaraokeTests(unittest.TestCase):
         self.ready()
         self.assertEqual(k.status(self.song)['state'], 'ready')
         with patch.object(k, 'source_for', return_value=(self.root / 'music.flac', 'c' * 64)):
-            self.assertEqual(k.status(self.song)['state'], 'missing')
+            status = k.status(self.song)
+            self.assertEqual(status['state'], 'missing')
+            # Said apart from a mix unreadable for a moment, so its download links end.
+            self.assertIs(status['changed'], True)
             with self.assertRaises(HTTPException): k.audio(self.song, 0, self.revision)
+        (self.root / self.revision / 'mix-25.flac').unlink()
+        self.assertNotIn('changed', k.status(self.song))
 
     def test_batched_status_checks_current_sources_and_cached_audio(self):
         self.ready()

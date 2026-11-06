@@ -70,6 +70,30 @@ class RequestTests(unittest.TestCase):
         results[0][0]['name'] = 'modified'
         self.assertEqual(cache.get(('account', 'song'), load)[0]['name'], 'original')
 
+    def test_a_brief_lookup_asks_for_itself_and_fails_nobody_else(self):
+        client = Jellyfin('http://jellyfin', 'private', [], '/music')
+        entered, release = threading.Event(), threading.Event()
+        def answer(*args, timeout, **kwargs):
+            if timeout != 20:
+                # Jellyfin too slow for the brief one.
+                raise HTTPException(503, 'Jellyfin is unavailable; try again shortly')
+            entered.set()
+            release.wait(5)
+            return {'Items': [{'Id': 'c' * 32, 'Type': 'Audio'}]}
+        client.json = Mock(side_effect=answer)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            # Under way first, then asked for briefly (a link check), then asked for again as usual.
+            first = executor.submit(client.item, 'a' * 32, 'c' * 32)
+            self.assertTrue(entered.wait(2))
+            with self.assertRaises(HTTPException):
+                client.item('a' * 32, 'c' * 32, timeout=(0.1, 0.2))
+            self.assertEqual(client.json.call_args.kwargs['timeout'], (0.1, 0.2), 'asked with its own time')
+            second = executor.submit(client.item, 'a' * 32, 'c' * 32)
+            release.set()
+            self.assertEqual(first.result(timeout=3)['Id'], 'c' * 32)
+            self.assertEqual(second.result(timeout=3)['Id'], 'c' * 32, 'the brief failure reached nobody else')
+        client.http.close()
+
     def test_metadata_is_account_scoped_expires_and_does_not_freeze_random_or_favourites(self):
         now = [1000]
         client = Jellyfin('http://jellyfin', 'private', [], '/music')
@@ -297,6 +321,13 @@ class ApplicationTests(unittest.TestCase):
         record.args = ('10.0.0.2:5000', 'GET', '/hub/api/room/qr?ticket=secret&url=http://tv/%23secret', '1.1', 200)
         application.HideTickets().filter(record)
         self.assertNotIn('secret', record.getMessage())
+        # Karaoke downloads: a shared link's token works for anyone until it ends, the app's ticket for minutes.
+        for path, route in [('/hub/dl/eyJsaW5rIjoxfQ.c2ln', '/hub/dl/'),
+                            ('/hub/api/karaoke/exports/file/eyJsaW5rIjoxfQ.c2ln', '/hub/api/karaoke/exports/file/')]:
+            record.args = ('10.0.0.2:5000', 'GET', path, '1.1', 200)
+            application.HideTickets().filter(record)
+            self.assertNotIn('eyJsaW5rIjoxfQ', record.getMessage())
+            self.assertIn(route, record.getMessage())
 
 
 class GenreFitTests(unittest.TestCase):

@@ -484,7 +484,8 @@ def job_status(song, fresh=True, part='vocals'):
     with lock, connect() as connection:
         row = connection.execute('SELECT * FROM jobs WHERE id=? AND part=?', (song, part)).fetchone()
     if row and row['state'] == 'ready' and current_revision(song, fresh, part) != row['revision']:
-        return {'state': 'missing', 'progress': 0, 'part': part,
+        # Said apart from a mix that can't be read for a moment: this one is over until prepared again.
+        return {'state': 'missing', 'progress': 0, 'part': part, 'changed': True,
                 'message': 'The original song changed; prepare it again'}
     return describe(row, part)
 

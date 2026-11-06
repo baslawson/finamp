@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:finamp/services/karaoke_service.dart';
 import 'package:finamp/services/server_hub_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 
@@ -25,6 +26,16 @@ enum KaraokeLinkLength {
 
   const KaraokeLinkLength(this.hours);
   final int hours;
+}
+
+/// Whoever asked for a file has gone (the sheet closed), so its wait or download stopped.
+class KaraokeExportCancelled implements Exception {
+  const KaraokeExportCancelled();
+}
+
+/// A link's stop that got no clear answer: it may or may not have stopped.
+class KaraokeStopUnanswered implements Exception {
+  const KaraokeStopUnanswered();
 }
 
 /// A mix converted on the server, ready to download with [ticket] for a few minutes.
@@ -59,6 +70,16 @@ class KaraokeExport {
   }) : _connect = connect ?? ServerHubService.connect,
        _directory = directory ?? (() async => Directory('${(await getTemporaryDirectory()).path}/karaoke-exports'));
 
+  /// Changes whenever a link is made or stopped here, so a list of them shown elsewhere can load them again.
+  static final linksChanged = ValueNotifier<int>(0);
+
+  /// The links stopped here, so a view still showing one (where it was made, say) can take it away.
+  static final stopped = <String>{};
+
+  /// What the hub says when asked to stop a link that already ended.
+  @visibleForTesting
+  static const linkEnded = 'This link already ended';
+
   final Future<ServerHubService?> Function() _connect;
   final Future<Directory> Function() _directory;
 
@@ -87,7 +108,15 @@ class KaraokeExport {
       (name: answer['name'] as String, ticket: answer['ticket'] as String, bytes: (answer['bytes'] as num).toInt());
 
   /// Has the server convert [song]'s mix (its [part] at [guide]) to [format], waiting while it does.
-  Future<KaraokeExportFile> prepare(String song, KaraokePart part, int guide, KaraokeFileFormat format) async {
+  /// [cancelled] says when whoever asked has gone (the sheet closed): the wait ends then, the server's conversion
+  /// carrying on for next time.
+  Future<KaraokeExportFile> prepare(
+    String song,
+    KaraokePart part,
+    int guide,
+    KaraokeFileFormat format, {
+    bool Function()? cancelled,
+  }) async {
     final hub = await _hub();
     final choice = _choice(song, part, guide, format);
     var answer = Map<String, dynamic>.from(
@@ -110,6 +139,7 @@ class KaraokeExport {
         case 'missing':
           throw const ServerHubException('The server could not convert this mix. Try again.');
       }
+      if (cancelled?.call() ?? false) throw const KaraokeExportCancelled();
       if (waited.elapsed + poll > patience) {
         throw const ServerHubException('The server is still converting this mix. Try again in a minute.');
       }
@@ -122,16 +152,38 @@ class KaraokeExport {
   }
 
   /// Downloads a converted [file] into this app's temporary folder, telling [progress] how far it got.
-  Future<File> download(KaraokeExportFile file, {void Function(double fraction)? progress}) async {
+  /// [cancelled] says when whoever asked has gone (the sheet closed): the download stops then, its connection
+  /// closed and nothing left behind.
+  Future<File> download(
+    KaraokeExportFile file, {
+    void Function(double fraction)? progress,
+    bool Function()? cancelled,
+  }) async {
     final hub = await _hub();
     final folder = await _directory();
-    await folder.create(recursive: true);
-    final target = File('${folder.path}/${file.name}');
-    // Each download writes its own file: the same mix downloaded twice at once (the sheet closed and opened again,
-    // say) must not write over itself.
-    final partial = File(
-      '${folder.path}/.${DateTime.now().microsecondsSinceEpoch}-${_random.nextInt(1 << 32)}.partial',
-    );
+    // Each download gets a folder of its own, keeping the file's name: the same mix downloaded twice at once (the
+    // sheet closed and opened again), or two songs with the same artist and title, must not write over a file another
+    // app may still be reading.
+    final own = Directory('${folder.path}/${DateTime.now().microsecondsSinceEpoch}-${_random.nextInt(1 << 32)}');
+    await own.create(recursive: true);
+    try {
+      return await _downloadInto(hub, own, file, progress, cancelled ?? () => false);
+    } catch (_) {
+      await own.delete(recursive: true).catchError((Object _) => own);
+      rethrow;
+    }
+  }
+
+  Future<File> _downloadInto(
+    ServerHubService hub,
+    Directory own,
+    KaraokeExportFile file,
+    void Function(double fraction)? progress,
+    bool Function() cancelled,
+  ) async {
+    if (cancelled()) throw const KaraokeExportCancelled();
+    final target = File('${own.path}/${file.name}');
+    final partial = File('${own.path}/.partial');
     final http.StreamedResponse response;
     try {
       response = await hub.download('/api/karaoke/exports/file/${file.ticket}', timeout: stall);
@@ -156,15 +208,18 @@ class KaraokeExport {
       // memory. One that stops sending for [stall] has dropped (the wait for storage doesn't count).
       await sink.addStream(
         response.stream.timeout(stall).map((chunk) {
+          // Stopping here ends the stream with an error, which closes the connection.
+          if (cancelled()) throw const KaraokeExportCancelled();
           received += chunk.length;
           if (total > 0) progress?.call(received / total);
           return chunk;
         }),
       );
       await sink.close();
-    } catch (_) {
+    } catch (error) {
       await sink.close().catchError((Object _) {});
       if (await partial.exists()) await partial.delete();
+      if (error is KaraokeExportCancelled) rethrow;
       throw const ServerHubException('The download was interrupted. Try again.');
     }
     if (total > 0 && received != total) {
@@ -192,6 +247,7 @@ class KaraokeExport {
           )
           as Map,
     );
+    linksChanged.value++;
     return (link: KaraokeLink.fromJson(answer), public: answer['public'] == true);
   }
 
@@ -207,12 +263,23 @@ class KaraokeExport {
   }
 
   Future<void> stop(String link, {ServerHubService? hub}) async {
+    // Not sent at all (no server hub, or another account now): a ServerHubException, as the link still works.
+    final server = hub ?? await _hub();
+    server.checkAccount();
     try {
-      await (hub ?? await _hub()).request('DELETE', '/api/karaoke/links/$link', serverMessages: true);
+      await server.request('DELETE', '/api/karaoke/links/$link', serverMessages: true);
     } on ServerHubException catch (error) {
-      // Already stopped or expired: either way it's gone.
-      if (error.status != 404) rethrow;
+      // Already stopped or expired (404): either way it's gone. Refused by the server, the link still works. A
+      // proxy's error, or the account changing as the answer came, says neither: it may have stopped all the same.
+      // Only the hub's own 404 says it's gone: a proxy's (while the hub restarts, say) says nothing.
+      final status = error.status;
+      if (status != 404 || error.message != linkEnded) {
+        if (status != null && status < 500 && status != 404) rethrow;
+        throw const KaraokeStopUnanswered();
+      }
     }
+    stopped.add(link);
+    linksChanged.value++;
   }
 
   /// Removes downloads left from earlier saves; the app they were shared with has long finished reading them.
@@ -220,9 +287,18 @@ class KaraokeExport {
     final folder = await _directory();
     if (!await folder.exists()) return;
     await for (final entry in folder.list()) {
-      if (entry is File && DateTime.now().difference(await entry.lastModified()) > age) {
-        await entry.delete().catchError((Object _) => entry);
-      }
+      try {
+        // Each download's own folder (and a loose file from an older version of the app). A folder's time doesn't
+        // change as its file is written, so a download still coming in is told by its file's.
+        var used = (await entry.stat()).modified;
+        if (entry is Directory) {
+          await for (final file in entry.list()) {
+            final modified = (await file.stat()).modified;
+            if (modified.isAfter(used)) used = modified;
+          }
+        }
+        if (DateTime.now().difference(used) > age) await entry.delete(recursive: true);
+      } catch (_) {}
     }
   }
 }

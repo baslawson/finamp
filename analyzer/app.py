@@ -46,9 +46,11 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 
 
 class HideTickets(logging.Filter):
-    """Radio, TV audio and backup links carry an access ticket; the request log keeps the route, not the ticket."""
+    """Radio, TV audio, backup and karaoke download links carry an access ticket; the request log keeps the route,
+    not the ticket. A shared karaoke link's token lets anyone download until it ends, so it mustn't sit in a log."""
 
-    PATTERN = re.compile(r"(/api/(?:radio/stream|media|download)/)[^\s?\"]+|((?:ticket|url)=)[^\s&\"]+")
+    PATTERN = re.compile(
+        r"(/api/(?:radio/stream|media|download|karaoke/exports/file)/|/hub/dl/)[^\s?\"]+|((?:ticket|url)=)[^\s&\"]+")
 
     def filter(self, record):
         if isinstance(record.args, tuple):

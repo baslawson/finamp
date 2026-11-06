@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:finamp/l10n/app_localizations.dart';
 import 'package:finamp/models/finamp_models.dart';
 import 'package:finamp/screens/server_hub_screen.dart';
 import 'package:finamp/services/analyzer_service.dart';
@@ -51,6 +52,7 @@ void main() {
         'GET /hub/api/sync': {'history': <Object>[], 'queue': null},
         'GET /hub/api/sync/items': <Object>[],
         'GET /hub/api/rooms': rooms,
+        'GET /hub/api/karaoke/links': {'links': <Object>[], 'public': true},
         'POST /hub/api/rooms/$room/stop': {'stopped': true},
         'POST /hub/api/rooms/$room/links': {
           'id': room,
@@ -74,7 +76,14 @@ void main() {
   });
 
   Future<void> openScreen(WidgetTester tester) async {
-    await tester.pumpWidget(const MaterialApp(home: ServerHubScreen()));
+    // With the app's texts, as the screen's download links (one of its parts) say when they can't be loaded.
+    await tester.pumpWidget(
+      const MaterialApp(
+        localizationsDelegates: AppLocalizations.localizationsDelegates,
+        supportedLocales: AppLocalizations.supportedLocales,
+        home: ServerHubScreen(),
+      ),
+    );
     await tester.pumpAndSettle();
   }
 
