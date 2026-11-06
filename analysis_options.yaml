@@ -15,6 +15,8 @@ analyzer:
     - lib/**.chopper.dart
     - lib/color_schemes.g.dart
     - build/**
+    # Vendored as it was, so it's not held to this project's style.
+    - packages/flutter_to_airplay/**
     - android/**
     - ios/**
     - web/**
