@@ -560,7 +560,8 @@ void main() {
       });
       await open(tester, offline: false);
       await tester.runAsync(() async {
-        await tester.tap(find.text('Share file'));
+        // Save, which every platform has (Share file isn't offered on Linux), downloads the same way first.
+        await tester.tap(find.text('Save to phone'));
         await until(() => aborted != null);
         body.add(utf8.encode('au'));
         await Future<void>.delayed(const Duration(milliseconds: 50));
