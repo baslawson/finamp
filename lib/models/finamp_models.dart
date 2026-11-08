@@ -1752,7 +1752,9 @@ class DownloadItem extends DownloadStub {
       newOrderedChildren = orderedChildItems?.map((e) => e.isarId).toList();
       if (!forceCopy) {
         if (viewId == null || viewId == this.viewId) {
-          if (item == null || baseItem!.mostlyEqual(item)) {
+          // A playlist's etag says whether it needs checking next time, so a new one has to be kept.
+          final newPlaylistEtag = item != null && baseItemType == BaseItemDtoType.playlist && item.etag != baseItem!.etag;
+          if (item == null || (baseItem!.mostlyEqual(item) && !newPlaylistEtag)) {
             var equal = const DeepCollectionEquality().equals;
             if (newOrderedChildren == null || equal(newOrderedChildren, orderedChildren)) {
               return null;

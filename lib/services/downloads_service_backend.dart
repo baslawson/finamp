@@ -694,6 +694,7 @@ class DownloadsSyncService {
   final Set<int> _infoCompleted = {};
   Completer<void>? _callbacksComplete;
   int _missingItemExceptions = 0;
+  int _skippedPlaylists = 0;
 
   final int _batchSize = 10;
 
@@ -735,14 +736,17 @@ class DownloadsSyncService {
       _childCache = {};
       _callbacksComplete = Completer();
       _missingItemExceptions = 0;
+      _skippedPlaylists = 0;
       unawaited(_advanceQueue());
       await _callbacksComplete!.future;
       _syncLogger.info("All syncs complete.");
+      if (_skippedPlaylists > 0) _syncLogger.info("Left out $_skippedPlaylists unchanged playlists.");
       if (_missingItemExceptions > 0) {
         showSyncWarningSnackbar();
       }
     } finally {
       _callbacksComplete = null;
+      _downloadsService.skipUnchangedPlaylists = false;
       // What this sync gathered isn't needed until the next one, which starts afresh.
       _requireCompleted.clear();
       _infoCompleted.clear();
@@ -894,6 +898,60 @@ class DownloadsSyncService {
     };
   }
 
+  /// Whether an automatic resync can leave out asking for this playlist's tracks. Only for playlists kept for their
+  /// track list and not downloaded, which are most of them on a big library: a downloaded one is always checked. A
+  /// sync the user started checks everything, and so does a repair.
+  bool _canSkipUnchangedPlaylist(DownloadStub parent, BaseItemDto? fresh, bool asRequired) {
+    if (asRequired || parent.type != DownloadItemType.collection || parent.baseItemType != BaseItemDtoType.playlist) {
+      return false;
+    }
+    if (fresh == null || !_downloadsService.skipUnchangedPlaylists || _downloadsService.forceFullSync) return false;
+    if (!FinampSettingsHelper.finampSettings.preferQuickSyncs) return false;
+    final stored = _isar.downloadItems.getSync(parent.isarId);
+    final storedItem = stored?.baseItem;
+    if (stored == null || storedItem == null) return false;
+    final canSkip = playlistUnchanged(
+      storedEtag: storedItem.etag,
+      freshEtag: fresh.etag,
+      serverTracks: fresh.childCount,
+      linkedTracks: stored.info.filter().typeEqualTo(DownloadItemType.track).countSync(),
+      tracksStored: stored.orderedChildren != null,
+      sameDetails: storedItem.mostlyEqual(fresh),
+      state: stored.state,
+      childFailed: stored.info
+          .filter()
+          .stateEqualTo(DownloadItemState.failed)
+          .or()
+          .stateEqualTo(DownloadItemState.syncFailed)
+          .isNotEmptySync(),
+    );
+    if (canSkip) _skippedPlaylists++;
+    return canSkip;
+  }
+
+  /// Whether a playlist is as it was when its tracks were last stored, and nothing about it needs another try.
+  /// Jellyfin gives a playlist a new etag whenever it's saved. A playlist can get its etag before its tracks are stored,
+  /// when it's first added, so [tracksStored] and the number of tracks have to say they're there. Syncing is also what
+  /// clears a failed sync and retries a failed cover or song, so those are never left out.
+  @visibleForTesting
+  static bool playlistUnchanged({
+    required String? storedEtag,
+    required String? freshEtag,
+    required int? serverTracks,
+    required int linkedTracks,
+    required bool tracksStored,
+    required bool sameDetails,
+    required DownloadItemState state,
+    required bool childFailed,
+  }) =>
+      storedEtag != null &&
+      storedEtag == freshEtag &&
+      serverTracks == linkedTracks &&
+      tracksStored &&
+      sameDetails &&
+      state != DownloadItemState.syncFailed &&
+      !childFailed;
+
   /// Syncs a downloaded item with the latest data from the server, then recursively
   /// syncs children.  The item should already be present in Isar.  Items can be synced
   /// as required or info.  Info collections will only have info child nodes, and info
@@ -1005,6 +1063,9 @@ class DownloadsSyncService {
         }
       }
     }
+
+    if (_canSkipUnchangedPlaylist(parent, newBaseItem, asRequired)) return;
+
     // We return the same BaseItemDto for all requests, so null out playlistItemId
     // as it will not usually be accurate.  Modifying without copying should be
     // fine as this item was generated within the download service, so this value

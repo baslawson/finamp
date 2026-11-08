@@ -95,6 +95,57 @@ class DownloadsService {
     return since.isNegative || since >= automaticResyncInterval;
   }
 
+  /// How often an automatic resync still checks every playlist: a playlist's etag doesn't change when one of its songs
+  /// is retagged or gets new art, so the ones it leaves out would otherwise never catch up.
+  static const fullPlaylistCheckInterval = Duration(days: 7);
+  static const _lastFullPlaylistCheckKey = 'downloadsLastFullPlaylistCheck';
+
+  /// Whether the current automatic resync may leave out playlists that haven't changed. Off for any other sync: set
+  /// just before an automatic resync, cleared when a sync the user started begins and when the sync run ends.
+  bool skipUnchangedPlaylists = false;
+
+  /// Whether every playlist should be checked at [now], the last full check having run at [last] (null for never). A
+  /// clock set back counts as due.
+  @visibleForTesting
+  static bool fullPlaylistCheckDue(DateTime? last, DateTime now) {
+    if (last == null) return true;
+    final since = now.difference(last);
+    return since.isNegative || since >= fullPlaylistCheckInterval;
+  }
+
+  /// Decides how much the automatic resync about to run checks. If the last full check can't be read, it checks all.
+  Future<void> _planAutomaticResync() async {
+    final userSyncsBefore = _userSyncsStarted;
+    var full = true;
+    try {
+      final now = DateTime.now(), prefs = SharedPreferencesAsync();
+      final last = await prefs.getInt(_lastFullPlaylistCheckKey);
+      full = fullPlaylistCheckDue(last == null ? null : DateTime.fromMillisecondsSinceEpoch(last), now);
+      if (full) await prefs.setInt(_lastFullPlaylistCheckKey, now.millisecondsSinceEpoch);
+    } catch (e) {
+      Logger("downloadsService").warning("Couldn't check when playlists were last fully checked: $e");
+    }
+    skipUnchangedPlaylists = mayLeaveOutPlaylists(
+      fullCheck: full,
+      syncsWaiting:
+          syncBuffer.isRunning || _isar.isarTaskDatas.filter().typeEqualTo(IsarTaskDataType.syncNode).countSync() > 0,
+      userSyncStarted: _userSyncsStarted != userSyncsBefore,
+    );
+  }
+
+  /// How many syncs the user has started, so an automatic resync being planned can tell one began meanwhile.
+  int _userSyncsStarted = 0;
+
+  /// Whether an automatic resync may leave out unchanged playlists. Not on a full check, and not when other sync work
+  /// is running or was left over from before: the queue is shared, so that work would be left out too, and it may be
+  /// a sync the user started or a full check that was cut short.
+  @visibleForTesting
+  static bool mayLeaveOutPlaylists({
+    required bool fullCheck,
+    required bool syncsWaiting,
+    required bool userSyncStarted,
+  }) => !fullCheck && !syncsWaiting && !userSyncStarted;
+
   /// Whether an automatic resync (at startup, or back after hours away) should run now; if so, it's noted as run.
   static Future<bool> automaticResyncDue() async {
     if (!FinampSettingsHelper.finampSettings.resyncOnStartup) return false;
@@ -343,6 +394,7 @@ class DownloadsService {
         _appPauseTime = null;
         unawaited(() async {
           if (away.inHours > 5 && await automaticResyncDue()) {
+            await _planAutomaticResync();
             _isar.writeTxnSync(() {
               syncBuffer.addAll([_anchor.isarId], [], null);
             });
@@ -413,6 +465,7 @@ class DownloadsService {
   /// after background_downloader is fully set up.
   Future<void> startQueues() async {
     if (await automaticResyncDue()) {
+      await _planAutomaticResync();
       _isar.writeTxnSync(() {
         syncBuffer.addAll([_anchor.isarId], [], null);
       });
@@ -569,6 +622,8 @@ class DownloadsService {
     // input and should run at full speed.
     if (!keepSlow) {
       fullSpeedSync = true;
+      skipUnchangedPlaylists = false;
+      _userSyncsStarted++;
     }
 
     // If asked to sync an album or track, force full sync to actually process it

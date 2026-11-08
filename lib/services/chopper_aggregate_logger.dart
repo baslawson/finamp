@@ -4,6 +4,39 @@ import 'dart:collection';
 import 'package:chopper/chopper.dart' as chopper;
 import 'package:logging/logging.dart';
 
+/// Thins out a burst of one kind of successful request, like a resync loading hundreds of playlists one by one, so it
+/// doesn't push the rest of the history out of the logs. The first [keepFirst] are logged as usual; the others are
+/// counted, and [report] gets one line about them once [quietAfter] passes without another.
+class RequestBurst {
+  RequestBurst({required this.report, this.keepFirst = 3, this.quietAfter = const Duration(seconds: 10)});
+
+  final void Function(String summary) report;
+  final int keepFirst;
+  final Duration quietAfter;
+
+  int _seen = 0;
+  int _slowestMs = 0;
+  Timer? _quiet;
+
+  /// Notes a successful request that took [elapsedMs], and returns whether to leave it out of the logs.
+  bool leaveOut(int elapsedMs) {
+    _seen++;
+    _quiet?.cancel();
+    _quiet = Timer(quietAfter, _finish);
+    if (_seen <= keepFirst) return false;
+    if (elapsedMs > _slowestMs) _slowestMs = elapsedMs;
+    return true;
+  }
+
+  void _finish() {
+    final leftOut = _seen - keepFirst;
+    if (leftOut > 0) report("...and $leftOut more playlists loaded, the slowest in $_slowestMs ms");
+    _seen = 0;
+    _slowestMs = 0;
+    _quiet = null;
+  }
+}
+
 /// A logger that aggregates the request and response logs from Chopper.
 /// Once a request (or response) is completed,
 /// the whole request log is flushed to the delegated chopperLogger.
@@ -54,16 +87,18 @@ class ChopperAggregateLogger implements Logger {
     _requests[request] = StringBuffer();
   }
 
-  void onEndRequest(chopper.Request request) {
-    info(_requests.remove(request)?.toString().trim());
+  void onEndRequest(chopper.Request request, {bool leaveOut = false}) {
+    final log = _requests.remove(request);
+    if (!leaveOut) info(log?.toString().trim());
   }
 
   void onStartResponse(chopper.Response<dynamic> response) {
     _responses[response] = StringBuffer();
   }
 
-  void onEndResponse(chopper.Response<dynamic> response) {
-    info(_responses.remove(response)?.toString().trim());
+  void onEndResponse(chopper.Response<dynamic> response, {bool leaveOut = false}) {
+    final log = _responses.remove(response);
+    if (!leaveOut) info(log?.toString().trim());
   }
 
   @override
