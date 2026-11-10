@@ -20,6 +20,20 @@ Working notes for this fork. This repository is public: no server addresses, acc
 - The **home** server in AgentReclaim's settings is the trading server and has nothing of Finamp's on it.
 - The analyzer's Jellyfin API key has no signed-in user. Jellyfin refuses it for anything needing one, such as moving a song within a playlist. It only accepts the `Authorization: MediaBrowser Token="..."` header.
 
+### Server changes (2026-11-10)
+
+- **Unfinished downloads hidden from Jellyfin.** qBittorrent now adds `.!qB` to files that aren't complete, so Jellyfin skips them. The James Reyne download stopped at 67% with no seeders. Jellyfin couldn't read many of its files and logged about 150 errors a day. Now 44 of its 186 songs are in the library. The rest come back if the download ever finishes.
+- **The VM's CPU type is `host`** (it was the default QEMU CPU). It now has AVX, AVX2 and AVX-512, which speeds up loudness measurement, the analyzer and karaoke. Changing it in Proxmox needs a Shutdown and Start from Proxmox; a reboot from inside the VM isn't enough. No GPU (Dell R640, Xeon Gold 6140 without built-in graphics), so video conversion runs on the CPU.
+- **Video conversion:** 4K HDR to SDR tone-mapping runs at about 1× on 6 cores (tested with Jellyfin's own settings; all 6 cores busy). More cores or direct play is the fix. Music conversion to Opus runs at 30–70×.
+- **Updated and restarted** onto the new kernel. Every container came back by itself. The analyzer logs "Library scan unavailable" for about a minute while Jellyfin starts, then carries on.
+- **Docker cleanup** freed about 10 GB: old untagged images, older rollback images, and build cache older than 7 days. The rollback images kept are `finamp-analyzer:before-linkstop` and `finamp-karaoke:before-linkstop`.
+
+Not done yet:
+
+- Jellyfin runs on the `latest` image, and tugtainer runs beside it. The 1.6.101 playlist skip relies on how Jellyfin 12.4 sets a playlist's Etag. Pinning the version would stop an automatic upgrade from changing that. tugtainer's settings haven't been checked.
+- The lyrics plugin gets many rate-limit replies (HTTP 429) from LRCLIB. They're harmless.
+- One add-to-playlist failed on 8 November with a database error (`FOREIGN KEY constraint failed`). It hasn't happened again.
+
 ## 1.6.101: automatic resyncs skip unchanged playlists
 
 An automatic resync used to send one request per playlist (about 297 requests, up to 166 s, at most every 12 hours). About 249 of those playlists are info-only (the song list is kept, the songs aren't downloaded). Those are now left out when unchanged. That also saves about 3,177 song syncs that followed from them.
