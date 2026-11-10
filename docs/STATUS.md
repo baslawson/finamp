@@ -24,7 +24,8 @@ Working notes for this fork. This repository is public: no server addresses, acc
 
 - **Unfinished downloads hidden from Jellyfin.** qBittorrent now adds `.!qB` to files that aren't complete, so Jellyfin skips them. The James Reyne download stopped at 67% with no seeders. Jellyfin couldn't read many of its files and logged about 150 errors a day. Now 44 of its 186 songs are in the library. The rest come back if the download ever finishes.
 - **The VM's CPU type is `host`** (it was the default QEMU CPU). It now has AVX, AVX2 and AVX-512, which speeds up loudness measurement, the analyzer and karaoke. Changing it in Proxmox needs a Shutdown and Start from Proxmox; a reboot from inside the VM isn't enough. No GPU (Dell R640, Xeon Gold 6140 without built-in graphics), so video conversion runs on the CPU.
-- **Video conversion:** 4K HDR to SDR tone-mapping runs at about 1× on 6 cores (tested with Jellyfin's own settings; all 6 cores busy). More cores or direct play is the fix. Music conversion to Opus runs at 30–70×.
+- **The VM has 12 cores** (it had 6).
+- **Video conversion:** 4K HDR to SDR tone-mapping, tested with Jellyfin's own settings, runs at 1.4× on 12 cores (0.98× on 6). It only uses about 8 of the 12, so more cores would add little. One 4K HDR stream plays smoothly; two at once would stutter, so direct play on a device that handles HEVC and HDR is the fix for that. Music conversion to Opus runs at 30–70×.
 - **Updated and restarted** onto the new kernel. Every container came back by itself. The analyzer logs "Library scan unavailable" for about a minute while Jellyfin starts, then carries on.
 - **Docker cleanup** freed about 10 GB: old untagged images, older rollback images, and build cache older than 7 days. The rollback images kept are `finamp-analyzer:before-linkstop` and `finamp-karaoke:before-linkstop`.
 
