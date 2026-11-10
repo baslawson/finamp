@@ -5,13 +5,13 @@ Working notes for this fork. This repository is public: no server addresses, acc
 ## Where things are
 
 - Branch `library-search`, pushed to the `fork` remote (`baslawson/finamp`). `origin` is upstream `jmshrv/finamp`.
-- Latest release: **1.6.101** (`ee4b0f56`), built from `18ca2d7b`.
+- Latest release: **1.6.102** (`aca28657`), built from `16b4b151`.
 - Release steps:
   1. Commit the change. Its message body becomes the release notes, so write it for users.
   2. Commit the `pubspec.yaml` version bump as `Release X.Y.Z`, directly after it.
   3. Tag `vX.Y.Z` and push the branch and the tag. `release-plus.yml` tests, builds the signed APKs and publishes.
 - Never leave a notes-only commit directly before a `Release` commit: its message would become the release notes.
-- Flutter is at `~/flutter/bin` on the devbox. `flutter test` takes about 2 minutes (1,462 tests at 1.6.101).
+- Flutter is at `~/flutter/bin` on the devbox. `flutter test` takes about 2 minutes (1,477 tests at 1.6.102).
 
 ## Servers
 
@@ -65,6 +65,10 @@ The skip relies on Jellyfin giving a playlist a new Etag whenever its tracks cha
 - Known limit: reordering a playlist counts as changed. If Jellyfin didn't give it a new Etag (moving wasn't tested live), that turns the skip off, which is right, since a left-out playlist would keep its old order.
 - Known limit: a library rescan that gives a song a new ID without a new playlist Etag also counts as a mismatch. That turns the skip off until the next Jellyfin version: safe, but it saves nothing meanwhile.
 - After installing it, the first automatic resync is a full check, since no version has been checked yet.
+
+Reviews: Codex and an independent agent (standing in for claude-checker, which isn't on the devbox) reviewed it, then rechecked three times. They found 8 bugs and 3 concerns: an interrupted or empty check recording `ok`; an edit during the check counting as a miss; a 5 s startup delay; a gap at the end of a run; a resync lost if the app closed within 10 s; a joined run confirming or dropping results; a user sync in the first 10 s going unnoticed. All were fixed, and both reviewers confirmed the final version with nothing open.
+
+To check after 1.6.102: in an uploaded log, the first automatic resync should end with `Playlist skip checked on Jellyfin 12.4.0: …`, and later ones should show `Left out N unchanged playlists.` again.
 
 Evidence for relying on the Etag:
 
