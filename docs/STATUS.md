@@ -57,10 +57,13 @@ Reviews: Codex and an independent agent reviewed it and rechecked the fixes. All
 
 - After the second automatic resync on 1.6.101 (the first is always a full check, and they're at least 12 hours apart), look in an uploaded log for `Left out N unchanged playlists.` N should be near 249, and `/Playlists/{id}/Items` requests should drop to about 48.
 - If N is near 0, find which condition fails. The most likely causes are `mostlyEqual` differing or the stored links not matching the track count.
+- Checked 2026-11-10: the 9 November upload covers about 22 hours on 1.6.101 (9 November 06:28 to 10 November 04:52, phone time) and has no automatic resync in it, so there's no `Left out N` line yet. Still waiting for a log from after the second automatic resync.
 
 ## What the logs showed (reviewed 2026-11-09)
 
 Reviewed: the six October uploads in `Logs/` (24–28 October, up to 1.6.71) and the two latest uploads (28 October to 9 November, up to 1.6.100). 1.6.100 had no errors and one harmless warning, over only 4 plays.
+
+1.6.101 (checked 2026-11-10, same upload): no errors and no failed requests. Three warnings, all normal: two `_buildQueueFromNativePlayerQueue` ignores and one WebSocket reconnect right after the update installed. Crossfade did 8 transitions with no underruns.
 
 Already fixed, or not seen again. No need to re-investigate unless they come back:
 
