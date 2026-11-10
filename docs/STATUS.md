@@ -41,14 +41,30 @@ Not done yet:
 
 An automatic resync used to send one request per playlist (about 297 requests, up to 166 s, at most every 12 hours). About 249 of those playlists are info-only (the song list is kept, the songs aren't downloaded). Those are now left out when unchanged. That also saves about 3,177 song syncs that followed from them.
 
-A playlist is left out only when all of these hold (`_canSkipUnchangedPlaylist` and `playlistUnchanged` in `downloads_service_backend.dart`):
+A playlist is left out only when all of these hold (`_unchangedPlaylistTracks` and `playlistUnchanged` in `downloads_service_backend.dart`):
 
 - It's info-only, and this is an automatic resync with quick sync on.
 - Its Etag and its details (`mostlyEqual`) match what's stored, and the server's track count matches the stored links.
+- The Etag has been confirmed reliable on the server's Jellyfin version (below).
 - Its song list has been stored at least once.
 - Neither it nor a direct child (song, cover) has failed.
 
 `DownloadsService.skipUnchangedPlaylists` turns this on just before an automatic resync. It stays off for the weekly full check (`fullPlaylistCheckInterval`) and when other sync work is running or left over. It's cleared when the user starts a sync and when the run ends.
+
+### 1.6.102: the skip checks itself
+
+The skip relies on Jellyfin giving a playlist a new Etag whenever its tracks change. Finamp now checks that itself, so it doesn't depend on Jellyfin staying at 12.4 (`etagPlan`, `etagCheckResult` and `recordEtagCheck` in `downloads_service.dart`; `_checkPlaylistEtag` in `downloads_service_backend.dart`):
+
+- Before each automatic resync it reads Jellyfin's version (`/System/Info/Public`). On a cold start that happens with the sync, 10 s after the app opens, so opening isn't delayed.
+- The first resync on a version it hasn't checked, or after an upgrade, is a full check. So is any resync where the version can't be read.
+- During each full check, every playlist that would have been left out has its fresh track list compared with the stored one. Different tracks count against the Etag only if the playlist, asked for again, still has the same Etag; a new one means it was edited during the check.
+- One playlist changed without a new Etag: the log says `Playlist skip turned off: …` (stored as `off|<version>` under `downloadsPlaylistEtagCheck`), and nothing is left out until Jellyfin's version changes.
+- All the same, at least one compared, and the check finished (no sync left queued, every candidate compared): the Etag is confirmed (`ok|<version>`), and playlists are left out until the next full check.
+- Anything less (offline partway, syncing paused, failures, nothing compared): the stored result is cleared and the log says `Playlist skip not confirmed …`, so the next automatic resync checks everything again.
+- Log lines to look for: `Playlist skip checked on Jellyfin <version>: …` or `Playlist skip turned off: …`, and `<playlist> changed without a new etag.` for each mismatch.
+- Known limit: reordering a playlist counts as changed. If Jellyfin didn't give it a new Etag (moving wasn't tested live), that turns the skip off, which is right, since a left-out playlist would keep its old order.
+- Known limit: a library rescan that gives a song a new ID without a new playlist Etag also counts as a mismatch. That turns the skip off until the next Jellyfin version: safe, but it saves nothing meanwhile.
+- After installing it, the first automatic resync is a full check, since no version has been checked yet.
 
 Evidence for relying on the Etag:
 

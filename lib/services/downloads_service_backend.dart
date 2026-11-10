@@ -696,6 +696,11 @@ class DownloadsSyncService {
   int _missingItemExceptions = 0;
   int _skippedPlaylists = 0;
 
+  /// While this sync checks playlist etags: the playlists that looked unchanged, those whose tracks were then compared,
+  /// and how many of those had changed without a new etag.
+  final Set<int> _etagCandidates = {}, _etagsCompared = {};
+  int _etagsMissed = 0;
+
   final int _batchSize = 10;
 
   DownloadsSyncService(this._downloadsService);
@@ -728,6 +733,10 @@ class DownloadsSyncService {
     if (_callbacksComplete != null) {
       return _callbacksComplete!.future;
     }
+    var syncsFinished = false;
+    // Only a run that starts out checking etags can confirm them: one an automatic resync joins partway through has
+    // already synced some playlists unchecked.
+    final checkingEtagsOn = _downloadsService.verifyEtagsOn;
     try {
       _requireCompleted.clear();
       _infoCompleted.clear();
@@ -737,8 +746,12 @@ class DownloadsSyncService {
       _callbacksComplete = Completer();
       _missingItemExceptions = 0;
       _skippedPlaylists = 0;
+      _etagCandidates.clear();
+      _etagsCompared.clear();
+      _etagsMissed = 0;
       unawaited(_advanceQueue());
       await _callbacksComplete!.future;
+      syncsFinished = true;
       _syncLogger.info("All syncs complete.");
       if (_skippedPlaylists > 0) _syncLogger.info("Left out $_skippedPlaylists unchanged playlists.");
       if (_missingItemExceptions > 0) {
@@ -746,7 +759,26 @@ class DownloadsSyncService {
       }
     } finally {
       _callbacksComplete = null;
+      // Stored without waiting, so a sync started right now gets a run of its own instead of this finished one.
+      if (_downloadsService.verifyEtagsOn case final version?) {
+        unawaited(
+          _downloadsService.recordEtagCheck(
+            version,
+            checked: _etagsCompared.length,
+            missed: _etagsMissed,
+            // Finished only if this run checked from its start, no sync was left queued (offline, paused or failing)
+            // and every playlist that looked unchanged was compared. A run joined partway can still find a miss, or
+            // clear what was stored, but never confirm.
+            finished:
+                checkingEtagsOn == version &&
+                syncsFinished &&
+                _isar.isarTaskDatas.where().typeEqualTo(type).countSync() == 0 &&
+                _etagCandidates.difference(_etagsCompared).isEmpty,
+          ),
+        );
+      }
       _downloadsService.skipUnchangedPlaylists = false;
+      _downloadsService.verifyEtagsOn = null;
       // What this sync gathered isn't needed until the next one, which starts afresh.
       _requireCompleted.clear();
       _infoCompleted.clear();
@@ -898,19 +930,23 @@ class DownloadsSyncService {
     };
   }
 
-  /// Whether an automatic resync can leave out asking for this playlist's tracks. Only for playlists kept for their
-  /// track list and not downloaded, which are most of them on a big library: a downloaded one is always checked. A
-  /// sync the user started checks everything, and so does a repair.
-  bool _canSkipUnchangedPlaylist(DownloadStub parent, BaseItemDto? fresh, bool asRequired) {
+  /// Whether this sync leaves out playlists that haven't changed. A sync the user started checks everything, and so
+  /// does a repair.
+  bool get _leavingOutPlaylists => _downloadsService.skipUnchangedPlaylists && !_downloadsService.forceFullSync;
+
+  /// The stored tracks of a playlist an automatic resync can leave out as unchanged, or null if it can't be. Only for
+  /// playlists kept for their track list and not downloaded, which are most of them on a big library: a downloaded one
+  /// is always checked. Worked out when this sync leaves playlists out, or when it checks that doing so is still right.
+  List<int>? _unchangedPlaylistTracks(DownloadStub parent, BaseItemDto? fresh, bool asRequired) {
     if (asRequired || parent.type != DownloadItemType.collection || parent.baseItemType != BaseItemDtoType.playlist) {
-      return false;
+      return null;
     }
-    if (fresh == null || !_downloadsService.skipUnchangedPlaylists || _downloadsService.forceFullSync) return false;
-    if (!FinampSettingsHelper.finampSettings.preferQuickSyncs) return false;
+    if (fresh == null || (!_leavingOutPlaylists && _downloadsService.verifyEtagsOn == null)) return null;
+    if (!FinampSettingsHelper.finampSettings.preferQuickSyncs) return null;
     final stored = _isar.downloadItems.getSync(parent.isarId);
     final storedItem = stored?.baseItem;
-    if (stored == null || storedItem == null) return false;
-    final canSkip = playlistUnchanged(
+    if (stored == null || storedItem == null) return null;
+    final unchanged = playlistUnchanged(
       storedEtag: storedItem.etag,
       freshEtag: fresh.etag,
       serverTracks: fresh.childCount,
@@ -925,9 +961,41 @@ class DownloadsSyncService {
           .stateEqualTo(DownloadItemState.syncFailed)
           .isNotEmptySync(),
     );
-    if (canSkip) _skippedPlaylists++;
-    return canSkip;
+    if (!unchanged) return null;
+    if (_downloadsService.verifyEtagsOn != null) _etagCandidates.add(parent.isarId);
+    return stored.orderedChildren;
   }
+
+  /// Compares the tracks of a playlist that looked unchanged with those just fetched, to tell whether its etag can be
+  /// relied on. A playlist whose tracks differ would have kept old tracks had it been left out. Unless it was edited
+  /// just now, between asking for its etag and its tracks: so before counting that against the etag, it's asked for
+  /// again, and a new etag means Jellyfin did its part. If that can't be asked, the playlist stays uncompared.
+  Future<void> _checkPlaylistEtag(
+    DownloadStub parent,
+    String? etag,
+    List<int> storedTracks,
+    List<DownloadStub> freshTracks,
+  ) async {
+    if (!sameTracks(storedTracks, freshTracks.map((track) => track.isarId).toList())) {
+      final BaseItemDto? again;
+      try {
+        again = await _jellyfinApiData.getItemByIdBatched(BaseItemId(parent.id), _syncItemFields);
+      } catch (e) {
+        _syncLogger.info("Couldn't ask for ${parent.name} again to check its etag: $e");
+        return;
+      }
+      if (again == null) return;
+      if (again.etag == etag) {
+        _etagsMissed++;
+        _syncLogger.warning("${parent.name} changed without a new etag.");
+      }
+    }
+    _etagsCompared.add(parent.isarId);
+  }
+
+  /// Whether a playlist has the same tracks in the same order.
+  @visibleForTesting
+  static bool sameTracks(List<int> stored, List<int> fresh) => const ListEquality<int>().equals(stored, fresh);
 
   /// Whether a playlist is as it was when its tracks were last stored, and nothing about it needs another try.
   /// Jellyfin gives a playlist a new etag whenever it's saved. A playlist can get its etag before its tracks are stored,
@@ -1064,7 +1132,11 @@ class DownloadsSyncService {
       }
     }
 
-    if (_canSkipUnchangedPlaylist(parent, newBaseItem, asRequired)) return;
+    final unchangedTracks = _unchangedPlaylistTracks(parent, newBaseItem, asRequired);
+    if (unchangedTracks != null && _leavingOutPlaylists) {
+      _skippedPlaylists++;
+      return;
+    }
 
     // We return the same BaseItemDto for all requests, so null out playlistItemId
     // as it will not usually be accurate.  Modifying without copying should be
@@ -1104,6 +1176,9 @@ class DownloadsSyncService {
         } catch (e) {
           _syncLogger.info("Error downloading children for ${item.name}: $e");
           rethrow;
+        }
+        if (unchangedTracks != null && orderedChildItems != null && _downloadsService.verifyEtagsOn != null) {
+          await _checkPlaylistEtag(parent, newBaseItem?.etag, unchangedTracks, orderedChildItems);
         }
         // TODO alert user if image deduplication is broken.
         if ((item.blurHash ?? item.imageId) != null) {

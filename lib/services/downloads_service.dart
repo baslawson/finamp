@@ -114,37 +114,134 @@ class DownloadsService {
   }
 
   /// Decides how much the automatic resync about to run checks. If the last full check can't be read, it checks all.
-  Future<void> _planAutomaticResync() async {
-    final userSyncsBefore = _userSyncsStarted;
-    var full = true;
+  /// When this resync's own work is already queued, [syncsWaitingBefore] says whether other sync work was queued before
+  /// it, and [userSyncsBefore] how many syncs the user had started by then.
+  Future<void> _planAutomaticResync({bool? syncsWaitingBefore, int? userSyncsBefore}) async {
+    userSyncsBefore ??= _userSyncsStarted;
+    final serverVersion = await _jellyfinVersion();
+    var plan = (full: true, trusted: false, verify: false);
     try {
       final now = DateTime.now(), prefs = SharedPreferencesAsync();
       final last = await prefs.getInt(_lastFullPlaylistCheckKey);
-      full = fullPlaylistCheckDue(last == null ? null : DateTime.fromMillisecondsSinceEpoch(last), now);
-      if (full) await prefs.setInt(_lastFullPlaylistCheckKey, now.millisecondsSinceEpoch);
+      plan = etagPlan(
+        serverVersion: serverVersion,
+        lastCheck: await prefs.getString(_etagCheckKey),
+        fullDue: fullPlaylistCheckDue(last == null ? null : DateTime.fromMillisecondsSinceEpoch(last), now),
+      );
+      if (plan.full) await prefs.setInt(_lastFullPlaylistCheckKey, now.millisecondsSinceEpoch);
     } catch (e) {
       Logger("downloadsService").warning("Couldn't check when playlists were last fully checked: $e");
     }
+    verifyEtagsOn = plan.verify ? serverVersion : null;
     skipUnchangedPlaylists = mayLeaveOutPlaylists(
-      fullCheck: full,
+      fullCheck: plan.full,
+      etagTrusted: plan.trusted,
       syncsWaiting:
-          syncBuffer.isRunning || _isar.isarTaskDatas.filter().typeEqualTo(IsarTaskDataType.syncNode).countSync() > 0,
+          syncBuffer.isRunning ||
+          (syncsWaitingBefore ?? _isar.isarTaskDatas.filter().typeEqualTo(IsarTaskDataType.syncNode).countSync() > 0),
       userSyncStarted: _userSyncsStarted != userSyncsBefore,
     );
+  }
+
+  /// The Jellyfin version the server reports, or null if it can't be read.
+  Future<String?> _jellyfinVersion() async {
+    if (FinampSettingsHelper.finampSettings.isOffline) return null;
+    try {
+      final info = await GetIt.instance<JellyfinApiHelper>().loadServerPublicInfo(timeout: const Duration(seconds: 5));
+      return info?.version;
+    } catch (e) {
+      Logger("downloadsService").warning("Couldn't read the Jellyfin version: $e");
+      return null;
+    }
+  }
+
+  /// Whether leaving out unchanged playlists was right on a Jellyfin version: `ok|<version>` or `off|<version>`.
+  static const _etagCheckKey = 'downloadsPlaylistEtagCheck';
+
+  /// The Jellyfin version this automatic resync checks playlist etags on, or null if it doesn't check them. Set just
+  /// before an automatic resync and cleared when the sync run ends, like [skipUnchangedPlaylists].
+  String? verifyEtagsOn;
+
+  /// What an automatic resync does about playlist etags. Leaving out a playlist relies on Jellyfin giving it a new etag
+  /// whenever its tracks change, which a Jellyfin upgrade could break. So the first resync on a Jellyfin version, or
+  /// one whose version can't be read, checks every playlist, and every full check also confirms the etags were right
+  /// ([verify]). Playlists are only left out on a version where that was confirmed ([trusted]); one where a playlist
+  /// changed without a new etag stays off until Jellyfin's version changes. [lastCheck] is what [etagCheckResult]
+  /// stored last.
+  @visibleForTesting
+  static ({bool full, bool trusted, bool verify}) etagPlan({
+    required String? serverVersion,
+    required String? lastCheck,
+    required bool fullDue,
+  }) {
+    if (serverVersion == null) return (full: true, trusted: false, verify: false);
+    final checkedVersion = lastCheck?.substring(lastCheck.indexOf('|') + 1);
+    if (lastCheck == null || !lastCheck.contains('|') || checkedVersion != serverVersion) {
+      return (full: true, trusted: false, verify: true);
+    }
+    final trusted = lastCheck.startsWith('ok|');
+    return (full: fullDue, trusted: trusted, verify: fullDue && trusted);
+  }
+
+  /// What to store after checking playlist etags on [version]: [checked] playlists looked unchanged and had their tracks
+  /// compared anyway, and [missed] of those had changed. One miss is enough to turn leaving out off. Otherwise the
+  /// etags are only confirmed by a check that [finished] (every playlist synced and compared) and compared at least one;
+  /// anything less gives null, which clears what was stored so the next automatic resync checks everything again.
+  @visibleForTesting
+  static String? etagCheckResult({
+    required String version,
+    required int checked,
+    required int missed,
+    required bool finished,
+  }) {
+    if (missed > 0) return "off|$version";
+    return finished && checked > 0 ? "ok|$version" : null;
+  }
+
+  /// Stores what a resync found about playlist etags on [version] (see [etagPlan] and [etagCheckResult]).
+  Future<void> recordEtagCheck(
+    String version, {
+    required int checked,
+    required int missed,
+    required bool finished,
+  }) async {
+    final result = etagCheckResult(version: version, checked: checked, missed: missed, finished: finished);
+    final logger = Logger("downloadsService");
+    if (missed > 0) {
+      logger.warning(
+        "Playlist skip turned off: $missed of $checked playlists changed without a new etag on Jellyfin $version.",
+      );
+    } else if (result != null) {
+      logger.info("Playlist skip checked on Jellyfin $version: all $checked unchanged playlists really were.");
+    } else {
+      logger.info("Playlist skip not confirmed on Jellyfin $version (compared $checked, finished: $finished).");
+    }
+    try {
+      final prefs = SharedPreferencesAsync();
+      if (result == null) {
+        await prefs.remove(_etagCheckKey);
+      } else {
+        await prefs.setString(_etagCheckKey, result);
+      }
+    } catch (e) {
+      logger.warning("Couldn't store the playlist etag check: $e");
+    }
   }
 
   /// How many syncs the user has started, so an automatic resync being planned can tell one began meanwhile.
   int _userSyncsStarted = 0;
 
-  /// Whether an automatic resync may leave out unchanged playlists. Not on a full check, and not when other sync work
-  /// is running or was left over from before: the queue is shared, so that work would be left out too, and it may be
-  /// a sync the user started or a full check that was cut short.
+  /// Whether an automatic resync may leave out unchanged playlists. Not on a full check, not on a Jellyfin version
+  /// where etags aren't known to be right ([etagPlan]), and not when other sync work is running or was left over from
+  /// before: the queue is shared, so that work would be left out too, and it may be a sync the user started or a full
+  /// check that was cut short.
   @visibleForTesting
   static bool mayLeaveOutPlaylists({
     required bool fullCheck,
+    required bool etagTrusted,
     required bool syncsWaiting,
     required bool userSyncStarted,
-  }) => !fullCheck && !syncsWaiting && !userSyncStarted;
+  }) => !fullCheck && etagTrusted && !syncsWaiting && !userSyncStarted;
 
   /// Whether an automatic resync (at startup, or back after hours away) should run now; if so, it's noted as run.
   static Future<bool> automaticResyncDue() async {
@@ -464,8 +561,12 @@ class DownloadsService {
   /// Begin processing stored downloads/deletes.  This should only be called
   /// after background_downloader is fully set up.
   Future<void> startQueues() async {
-    if (await automaticResyncDue()) {
-      await _planAutomaticResync();
+    // Queued right after it's noted as run, so closing the app now can't lose it: the queue is kept.
+    final resyncDue = await automaticResyncDue();
+    bool? syncsWaitingBefore;
+    final userSyncsBefore = _userSyncsStarted;
+    if (resyncDue) {
+      syncsWaitingBefore = _isar.isarTaskDatas.filter().typeEqualTo(IsarTaskDataType.syncNode).countSync() > 0;
       _isar.writeTxnSync(() {
         syncBuffer.addAll([_anchor.isarId], [], null);
       });
@@ -477,6 +578,10 @@ class DownloadsService {
     _finampUserHelper.runUserHook(() async {
       await Future<void>.delayed(const Duration(seconds: 10));
       try {
+        // Planned here rather than before the app opens: planning asks the server for Jellyfin's version.
+        if (syncsWaitingBefore != null) {
+          await _planAutomaticResync(syncsWaitingBefore: syncsWaitingBefore, userSyncsBefore: userSyncsBefore);
+        }
         await syncBuffer.executeSyncs();
         await deleteBuffer.executeDeletes();
         await downloadTaskQueue.executeDownloads();

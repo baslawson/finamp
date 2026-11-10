@@ -110,10 +110,19 @@ void main() {
   });
 
   group("an automatic resync leaves out unchanged playlists", () {
-    bool mayLeaveOut({bool full = false, bool waiting = false, bool userSync = false}) =>
-        DownloadsService.mayLeaveOutPlaylists(fullCheck: full, syncsWaiting: waiting, userSyncStarted: userSync);
+    bool mayLeaveOut({bool full = false, bool trusted = true, bool waiting = false, bool userSync = false}) =>
+        DownloadsService.mayLeaveOutPlaylists(
+          fullCheck: full,
+          etagTrusted: trusted,
+          syncsWaiting: waiting,
+          userSyncStarted: userSync,
+        );
 
     test("when nothing else is going on", () => expect(mayLeaveOut(), isTrue));
+
+    test("but not on a Jellyfin version where etags aren't known to be right", () {
+      expect(mayLeaveOut(trusted: false), isFalse);
+    });
 
     test("but not on the weekly full check", () => expect(mayLeaveOut(full: true), isFalse));
 
@@ -137,6 +146,76 @@ void main() {
 
     test("is due when the clock was set back", () {
       expect(DownloadsService.fullPlaylistCheckDue(now.add(const Duration(days: 1)), now), isTrue);
+    });
+  });
+
+  group("checking that playlist etags can be relied on", () {
+    ({bool full, bool trusted, bool verify}) plan({String? version = "12.4.0", String? last, bool fullDue = false}) =>
+        DownloadsService.etagPlan(serverVersion: version, lastCheck: last, fullDue: fullDue);
+
+    test("the first resync on a version checks everything and confirms the etags", () {
+      expect(plan(last: null), (full: true, trusted: false, verify: true));
+    });
+
+    test("a Jellyfin upgrade checks everything again, even with etags confirmed on the old version", () {
+      expect(plan(last: "ok|12.3.0"), (full: true, trusted: false, verify: true));
+    });
+
+    test("confirmed etags let playlists be left out between full checks", () {
+      expect(plan(last: "ok|12.4.0"), (full: false, trusted: true, verify: false));
+    });
+
+    test("each weekly full check confirms them again", () {
+      expect(plan(last: "ok|12.4.0", fullDue: true), (full: true, trusted: true, verify: true));
+    });
+
+    test("etags found wrong keep playlists in until Jellyfin's version changes", () {
+      expect(plan(last: "off|12.4.0"), (full: false, trusted: false, verify: false));
+      expect(plan(last: "off|12.4.0", fullDue: true), (full: true, trusted: false, verify: false));
+      expect(plan(last: "off|12.3.0"), (full: true, trusted: false, verify: true));
+    });
+
+    test("an unknown version checks everything but learns nothing", () {
+      expect(plan(version: null, last: "ok|12.4.0"), (full: true, trusted: false, verify: false));
+    });
+
+    test("a stored value that can't be read counts as never checked", () {
+      expect(plan(last: "garbled"), (full: true, trusted: false, verify: true));
+    });
+
+    String? result({int checked = 240, int missed = 0, bool finished = true}) =>
+        DownloadsService.etagCheckResult(version: "12.4.0", checked: checked, missed: missed, finished: finished);
+
+    test("a finished check where every playlist matched confirms the version", () {
+      expect(result(), "ok|12.4.0");
+    });
+
+    test("one playlist that changed without a new etag turns leaving out off", () {
+      expect(result(missed: 1), "off|12.4.0");
+    });
+
+    test("a miss counts even if the check was cut short", () {
+      expect(result(missed: 1, finished: false), "off|12.4.0");
+    });
+
+    test("a check cut short confirms nothing, so the next resync checks everything again", () {
+      expect(result(finished: false), isNull);
+    });
+
+    test("a check that compared no playlists confirms nothing either", () {
+      expect(result(checked: 0), isNull);
+    });
+
+    test("the same tracks in the same order match", () {
+      expect(DownloadsSyncService.sameTracks([1, 2, 3], [1, 2, 3]), isTrue);
+      expect(DownloadsSyncService.sameTracks([], []), isTrue);
+    });
+
+    test("an added, removed, swapped or moved track doesn't", () {
+      expect(DownloadsSyncService.sameTracks([1, 2], [1, 2, 3]), isFalse);
+      expect(DownloadsSyncService.sameTracks([1, 2, 3], [1, 3]), isFalse);
+      expect(DownloadsSyncService.sameTracks([1, 2, 3], [1, 2, 4]), isFalse);
+      expect(DownloadsSyncService.sameTracks([1, 2, 3], [3, 1, 2]), isFalse);
     });
   });
 }
