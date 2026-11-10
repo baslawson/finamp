@@ -29,7 +29,7 @@ Working notes for this fork. This repository is public: no server addresses, acc
 - **Updated and restarted** onto the new kernel. Every container came back by itself. The analyzer logs "Library scan unavailable" for about a minute while Jellyfin starts, then carries on.
 - **Docker cleanup** freed about 10 GB: old untagged images, older rollback images, and build cache older than 7 days. The rollback images kept are `finamp-analyzer:before-linkstop` and `finamp-karaoke:before-linkstop`.
 
-- **Jellyfin pinned** to `lscr.io/linuxserver/jellyfin:12.4ubu2604-ls58` (was `latest`), in its Portainer stack. The 1.6.101 playlist skip relies on how Jellyfin 12.4 sets a playlist's Etag, so an automatic upgrade can't change that now. The pin also stops operating-system updates inside the image: bump the `-lsNN` number by hand now and then. `version-12.4ubu2604` would stay on 12.4 and still get them.
+- **Jellyfin pinned** to `lscr.io/linuxserver/jellyfin:12.4ubu2604-ls58` (was `latest`), in its Portainer stack. Done because the 1.6.101 playlist skip relied on how Jellyfin 12.4 sets a playlist's Etag. Since 1.6.102 Finamp checks that itself after any Jellyfin upgrade, so the pin is no longer needed for Finamp; it can go to `version-12.4ubu2604` or back to `latest`. The pin also stops operating-system updates inside the image: bump the `-lsNN` number by hand now and then. `version-12.4ubu2604` would stay on 12.4 and still get them.
 
 Not done yet:
 
@@ -83,7 +83,7 @@ Reviews: Codex and an independent agent reviewed it and rechecked the fixes. All
 
 - Moving a song within a playlist wasn't tested live, only read in the source.
 - The source read was `master`; the `v12.4.0` tag wasn't available.
-- `_canSkipUnchangedPlaylist` itself has no unit test, since it needs the on-device database. Its conditions are tested through `playlistUnchanged`.
+- `_unchangedPlaylistTracks` (was `_canSkipUnchangedPlaylist`), `_checkPlaylistEtag` and the recording in `executeSyncs` have no unit test, since they need the on-device database. Their decisions are tested through `playlistUnchanged`, `mayLeaveOutPlaylists`, `etagPlan`, `etagCheckResult` and `sameTracks`.
 - A failed cover on an info-only song is retried only by the weekly check or a manual sync.
 - If the user starts a sync during an automatic one, playlists already left out in that run stay left out until the next check.
 - A playlist opened during a resync can show only in the summary count.
@@ -92,9 +92,9 @@ Reviews: Codex and an independent agent reviewed it and rechecked the fixes. All
 
 ## To check next
 
-- After the second automatic resync on 1.6.101 (the first is always a full check, and they're at least 12 hours apart), look in an uploaded log for `Left out N unchanged playlists.` N should be near 249, and `/Playlists/{id}/Items` requests should drop to about 48.
-- If N is near 0, find which condition fails. The most likely causes are `mostlyEqual` differing or the stored links not matching the track count.
-- Checked 2026-11-10: the 9 November upload covers about 22 hours on 1.6.101 (9 November 06:28 to 10 November 04:52, phone time) and has no automatic resync in it, so there's no `Left out N` line yet. Still waiting for a log from after the second automatic resync.
+- On 1.6.102, the first automatic resync is a full check that confirms the Etag: look for `Playlist skip checked on Jellyfin 12.4.0: …` (or `Playlist skip turned off: …` / `not confirmed`). From the second one on (at least 12 hours later), look for `Left out N unchanged playlists.` N should be near 249, and `/Playlists/{id}/Items` requests should drop to about 48.
+- If N is near 0, find which condition fails. The most likely causes are the Etag not confirmed yet, `mostlyEqual` differing, or the stored links not matching the track count.
+- Checked 2026-11-10: the 9 November upload covers about 22 hours on 1.6.101 (9 November 06:28 to 10 November 04:52, phone time) and has no automatic resync in it, so there's no `Left out N` line yet. No 1.6.101 log with a resync is needed any more: the check above replaces it on 1.6.102.
 
 ## What the logs showed (reviewed 2026-11-09)
 
