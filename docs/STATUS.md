@@ -29,9 +29,11 @@ Working notes for this fork. This repository is public: no server addresses, acc
 - **Updated and restarted** onto the new kernel. Every container came back by itself. The analyzer logs "Library scan unavailable" for about a minute while Jellyfin starts, then carries on.
 - **Docker cleanup** freed about 10 GB: old untagged images, older rollback images, and build cache older than 7 days. The rollback images kept are `finamp-analyzer:before-linkstop` and `finamp-karaoke:before-linkstop`.
 
+- **Jellyfin pinned** to `lscr.io/linuxserver/jellyfin:12.4ubu2604-ls58` (was `latest`), in its Portainer stack. The 1.6.101 playlist skip relies on how Jellyfin 12.4 sets a playlist's Etag, so an automatic upgrade can't change that now. The pin also stops operating-system updates inside the image: bump the `-lsNN` number by hand now and then. `version-12.4ubu2604` would stay on 12.4 and still get them.
+
 Not done yet:
 
-- Jellyfin runs on the `latest` image, and tugtainer runs beside it. The 1.6.101 playlist skip relies on how Jellyfin 12.4 sets a playlist's Etag. Pinning the version would stop an automatic upgrade from changing that. tugtainer's settings haven't been checked.
+- Tugtainer's settings haven't been checked. They're in its main instance, which needs a login. Since 7 November its agent has only listed containers and inspected images, never updated one. With Jellyfin pinned, this only matters for the other containers.
 - The lyrics plugin gets many rate-limit replies (HTTP 429) from LRCLIB. They're harmless.
 - One add-to-playlist failed on 8 November with a database error (`FOREIGN KEY constraint failed`). It hasn't happened again.
 
